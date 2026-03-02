@@ -1613,6 +1613,15 @@ impl Node {
     ) -> Result<()> {
         tracing::info!("Inbound gossip from {}", remote.fmt_short());
 
+        // If this peer was declared dead but is now gossiping with us,
+        // they're clearly alive. Clear the dead flag so add_peer accepts them.
+        {
+            let mut state = self.state.lock().await;
+            if state.dead_peers.remove(&remote) {
+                eprintln!("🔄 Dead peer {} is gossiping — clearing dead status", remote.fmt_short());
+            }
+        }
+
         // Read their announcements
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;
@@ -1736,10 +1745,10 @@ impl Node {
         }
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() { return; }
-        // Don't re-add peers we've confirmed dead
-        if state.dead_peers.contains(&id) {
-            tracing::debug!("Ignoring add_peer for dead peer {}", id.fmt_short());
-            return;
+        // If this peer was previously dead, clear it — add_peer is only called
+        // after a successful gossip exchange, which is proof of life.
+        if state.dead_peers.remove(&id) {
+            eprintln!("🔄 Peer {} back from the dead (successful gossip)", id.fmt_short());
         }
         // Merge demand from this peer into our mesh-wide demand map.
         // If the peer sends model_demand (new node), use that directly.
