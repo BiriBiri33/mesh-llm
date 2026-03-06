@@ -27,9 +27,13 @@ Design: [MoE_PLAN.md](../MoE_PLAN.md) · Auto-deploy: [MoE_DEPLOY_DESIGN.md](../
 - [ ] **Phase 7: pre-split shard downloads** — instead of downloading full GGUF + splitting locally, host pre-split shards on HuggingFace. Each node downloads only its shard (~40% of full size). WIP on `moe-shards` branch (MoeConfig has `shards` field, not wired into download path yet). Needs: a big machine to do initial split, HF repo to host shards, download code to use shard URLs when available.
 
 ## Resilience
-- [x] Nostr re-discovery on peer loss (v0.26.1): `--auto` nodes re-discover after 90s with 0 peers.
+- [x] Nostr re-discovery on peer loss (v0.26.1): `--auto` nodes re-discover after 90s with 0 peers. Works for joiners, originators, and clients.
+- [x] llama-server death watchdog (v0.27.0): detects crash, resets election, auto-restarts.
+- [x] Multi-host load balancing (v0.27.0): proxy round-robins when multiple nodes serve same model.
+- [x] Demand-based duplicate hosting (v0.27.0): second node stays standby until 2+ clients or 10+ requests.
 - [ ] **Demand-based model upgrade**: Large-VRAM host serving a small model should upgrade when demand exists for a bigger model nobody is serving.
 - [ ] **Multi-node tensor split recovery**: If one split peer dies, re-split across remaining.
+- [ ] **`kill_llama_server()` uses `pkill -f`**: Kills ALL llama-server processes system-wide. Should kill by PID.
 
 ## Discovery & Publishing
 - [ ] **Revisit `--publish` flag**: Bare `--publish` without `--mesh-name` is vestigial. Consider requiring `--mesh-name` or auto-generating a name.
