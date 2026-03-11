@@ -174,25 +174,7 @@ enum Command {
     },
     /// Rotate the Nostr identity key (forces new keypair on next --publish)
     RotateKey,
-    /// Explode a MoE GGUF into trunk + per-expert files
-    Explode {
-        /// Path to the MoE GGUF model file
-        model: String,
-        /// Output directory for trunk.gguf + expert-NNN.gguf files
-        #[arg(short, long)]
-        output: String,
-    },
-    /// Assemble a shard GGUF from trunk + expert files
-    Assemble {
-        /// Path to trunk.gguf
-        trunk: String,
-        /// Expert IDs to include (comma-separated, e.g. "0,1,2,3")
-        #[arg(long)]
-        experts: String,
-        /// Output shard GGUF path
-        #[arg(short, long)]
-        output: String,
-    },
+
 }
 
 #[tokio::main]
@@ -252,26 +234,7 @@ async fn main() -> Result<()> {
             Command::RotateKey => {
                 return nostr::rotate_keys().map_err(Into::into);
             }
-            Command::Explode { model, output } => {
-                let model_path = std::path::Path::new(model);
-                let output_dir = std::path::Path::new(output);
-                moe::explode_model(model_path, output_dir)?;
-                return Ok(());
-            }
-            Command::Assemble { trunk, experts, output } => {
-                let trunk_path = std::path::Path::new(trunk);
-                let trunk_dir = trunk_path.parent().unwrap_or(std::path::Path::new("."));
-                let expert_ids: Vec<u32> = experts.split(',')
-                    .map(|s| s.trim().parse::<u32>())
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| anyhow::anyhow!("bad expert IDs: {e}"))?;
-                let expert_paths: Vec<std::path::PathBuf> = expert_ids.iter()
-                    .map(|id| trunk_dir.join(format!("expert-{:03}.gguf", id)))
-                    .collect();
-                let output_path = std::path::Path::new(output);
-                moe::assemble_shard(trunk_path, &expert_paths, output_path)?;
-                return Ok(());
-            }
+
         }
     }
 
