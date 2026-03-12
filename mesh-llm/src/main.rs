@@ -860,6 +860,18 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
         let assignment = pick_model_assignment(&node, &local_models).await;
+        // If no demand-based assignment but we have VRAM, use auto pack's primary model
+        let assignment = if assignment.is_none() && cli.auto && !is_client {
+            let pack = nostr::auto_model_pack(node.vram_bytes() as f64 / 1e9);
+            if !pack.is_empty() {
+                eprintln!("📋 No unserved demand — serving {} for {:.0}GB VRAM", pack[0], node.vram_bytes() as f64 / 1e9);
+                Some(pack[0].clone())
+            } else {
+                assignment
+            }
+        } else {
+            assignment
+        };
         if let Some(model_name) = assignment {
             eprintln!("Mesh assigned model: {model_name}");
             let model_path = mesh::find_model_path(&model_name);
@@ -1723,15 +1735,15 @@ async fn probe_mesh_health(invite_token: &str, relay_urls: &[String]) -> Result<
 
 /// Helper for StartNew path — configure CLI to start a new mesh.
 fn start_new_mesh(cli: &mut Cli, _models: &[String], my_vram_gb: f64) {
-    // Pick models to actually serve (opinionated packs based on VRAM)
+    // Pick the best single model for this VRAM tier.
+    // Multi-model requires explicit --model A --model B.
     let pack = nostr::auto_model_pack(my_vram_gb);
+    let primary = pack.first().cloned().unwrap_or_default();
     eprintln!("🆕 Starting a new mesh");
-    eprintln!("   Serving: {:?}", pack);
+    eprintln!("   Serving: {primary}");
     eprintln!("   VRAM: {:.0}GB", my_vram_gb);
     if cli.model.is_empty() {
-        for m in &pack {
-            cli.model.push(m.into());
-        }
+        cli.model.push(primary.into());
     }
     if !cli.publish {
         cli.publish = true;
