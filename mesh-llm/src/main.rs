@@ -917,8 +917,12 @@ async fn run_auto(mut cli: Cli, resolved_models: Vec<PathBuf>, requested_model_n
         model_name.clone()
     };
     node.set_model_source(model_source).await;
-    node.set_serving(Some(model_name.clone())).await;
-    node.set_models(vec![model_name.clone()]).await;
+    // Set all serving models (primary + extras)
+    let all_serving: Vec<String> = resolved_models.iter()
+        .map(|m| m.file_stem().unwrap_or_default().to_string_lossy().to_string())
+        .collect();
+    node.set_serving_models(all_serving.clone()).await;
+    node.set_models(all_serving).await;
     // Re-gossip so peers learn what we're serving
     node.regossip().await;
 

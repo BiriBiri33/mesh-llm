@@ -762,9 +762,17 @@ async fn update_targets(
         targets.entry(my_model.to_string()).or_default().push(my_target);
     }
 
-    // All peers — group by model
+    // All peers — group by model (multi-model aware)
     for p in &peers {
-        if let Some(ref serving) = p.serving {
+        // Collect all models this peer is serving
+        let peer_models: Vec<String> = if !p.serving_models.is_empty() {
+            p.serving_models.clone()
+        } else if let Some(ref s) = p.serving {
+            vec![s.clone()]
+        } else {
+            vec![]
+        };
+        for serving in &peer_models {
             if matches!(p.role, NodeRole::Host { .. }) {
                 // Peer is a confirmed host — add as target
                 targets.entry(serving.clone()).or_default().push(InferenceTarget::Remote(p.id));

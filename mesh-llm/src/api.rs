@@ -78,6 +78,7 @@ struct PeerPayload {
     models: Vec<String>,
     vram_gb: f64,
     serving: Option<String>,
+    serving_models: Vec<String>,
     rtt_ms: Option<u32>,
 }
 
@@ -187,6 +188,7 @@ impl MeshApi {
                 models: p.models.clone(),
                 vram_gb: p.vram_bytes as f64 / 1e9,
                 serving: p.serving.clone(),
+                serving_models: p.serving_models.clone(),
                 rtt_ms: p.rtt_ms,
             })
             .collect();
@@ -194,6 +196,7 @@ impl MeshApi {
         let catalog = node.mesh_catalog().await;
         let served = node.models_being_served().await;
         let active_demand = node.active_demand().await;
+        let my_serving_models = node.serving_models().await;
         let now_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -202,9 +205,13 @@ impl MeshApi {
             let is_warm = served.contains(name);
             let node_count = if is_warm {
                 let peer_count = all_peers.iter()
-                    .filter(|p| p.serving.as_deref() == Some(name.as_str()))
+                    .filter(|p| {
+                        p.serving_models.iter().any(|s| s == name)
+                            || p.serving.as_deref() == Some(name.as_str())
+                    })
                     .count();
-                let me = if *name == model_name { 1 } else { 0 };
+                // Count self: check all serving models, fall back to primary model_name
+                let me = if my_serving_models.iter().any(|s| s == name) || *name == model_name { 1 } else { 0 };
                 peer_count + me
             } else {
                 0

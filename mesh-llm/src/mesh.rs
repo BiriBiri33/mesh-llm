@@ -88,9 +88,13 @@ struct PeerAnnouncement {
     /// Lets joining nodes auto-download without specifying --model.
     #[serde(default)]
     model_source: Option<String>,
-    /// Model currently loaded in VRAM (None = not assigned yet)
+    /// Primary model currently loaded in VRAM (None = not assigned yet).
+    /// Kept for backward compat — old nodes only read this field.
     #[serde(default)]
     serving: Option<String>,
+    /// All models currently loaded in VRAM (multi-model per node).
+    #[serde(default)]
+    serving_models: Vec<String>,
     /// All GGUF filenames on disk in ~/.models/ (for mesh catalog)
     #[serde(default)]
     available_models: Vec<String>,
@@ -119,8 +123,10 @@ pub struct PeerInfo {
     pub vram_bytes: u64,
     pub rtt_ms: Option<u32>,
     pub model_source: Option<String>,
-    /// Model currently loaded in VRAM
+    /// Primary model currently loaded in VRAM
     pub serving: Option<String>,
+    /// All models currently loaded in VRAM (multi-model per node)
+    pub serving_models: Vec<String>,
     /// All GGUFs on disk
     pub available_models: Vec<String>,
     /// Models this node has requested the mesh to serve
@@ -409,6 +415,7 @@ pub struct Node {
     models: Arc<Mutex<Vec<String>>>,
     model_source: Arc<Mutex<Option<String>>>,
     serving: Arc<Mutex<Option<String>>>,
+    serving_models: Arc<Mutex<Vec<String>>>,
     llama_ready: Arc<Mutex<bool>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
@@ -581,6 +588,7 @@ impl Node {
             models: Arc::new(Mutex::new(Vec::new())),
             model_source: Arc::new(Mutex::new(None)),
             serving: Arc::new(Mutex::new(None)),
+            serving_models: Arc::new(Mutex::new(Vec::new())),
             llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
@@ -666,6 +674,16 @@ impl Node {
 
     pub async fn set_serving(&self, model: Option<String>) {
         *self.serving.lock().await = model;
+    }
+
+    pub async fn set_serving_models(&self, models: Vec<String>) {
+        // Also keep `serving` in sync (primary = first model)
+        *self.serving.lock().await = models.first().cloned();
+        *self.serving_models.lock().await = models;
+    }
+
+    pub async fn serving_models(&self) -> Vec<String> {
+        self.serving_models.lock().await.clone()
     }
 
     /// Re-gossip our state to all connected peers.
@@ -1051,14 +1069,29 @@ impl Node {
     /// Get all models currently being served in the mesh (loaded in VRAM somewhere).
     pub async fn models_being_served(&self) -> Vec<String> {
         let state = self.state.lock().await;
+        let my_serving_models = self.serving_models.lock().await;
         let my_serving = self.serving.lock().await;
         let mut served = std::collections::HashSet::new();
-        if let Some(ref s) = *my_serving {
+        // Multi-model: all models this node is serving
+        for s in my_serving_models.iter() {
             served.insert(s.clone());
         }
-        for p in state.peers.values() {
-            if let Some(ref s) = p.serving {
+        // Fallback: single serving field (for nodes not yet multi-model aware)
+        if my_serving_models.is_empty() {
+            if let Some(ref s) = *my_serving {
                 served.insert(s.clone());
+            }
+        }
+        for p in state.peers.values() {
+            // Multi-model peers
+            for s in &p.serving_models {
+                served.insert(s.clone());
+            }
+            // Fallback for old peers
+            if p.serving_models.is_empty() {
+                if let Some(ref s) = p.serving {
+                    served.insert(s.clone());
+                }
             }
         }
         let mut result: Vec<String> = served.into_iter().collect();
@@ -1833,6 +1866,7 @@ impl Node {
                 existing.model_source = ann.model_source.clone();
             }
             existing.serving = ann.serving.clone();
+            existing.serving_models = ann.serving_models.clone();
             existing.available_models = ann.available_models.clone();
             existing.requested_models = ann.requested_models.clone();
             existing.last_seen = std::time::Instant::now();
@@ -1854,6 +1888,7 @@ impl Node {
             rtt_ms: None,
             model_source: ann.model_source.clone(),
             serving: ann.serving.clone(),
+            serving_models: ann.serving_models.clone(),
             available_models: ann.available_models.clone(),
             requested_models: ann.requested_models.clone(),
             last_seen: std::time::Instant::now(),
@@ -1870,6 +1905,7 @@ impl Node {
         let my_models = self.models.lock().await.clone();
         let my_source = self.model_source.lock().await.clone();
         let my_serving = self.serving.lock().await.clone();
+        let my_serving_models = self.serving_models.lock().await.clone();
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();
         let my_mesh_id = self.mesh_id.lock().await.clone();
@@ -1884,6 +1920,7 @@ impl Node {
                 vram_bytes: p.vram_bytes,
                 model_source: p.model_source.clone(),
                 serving: p.serving.clone(),
+                serving_models: p.serving_models.clone(),
                 available_models: p.available_models.clone(),
                 requested_models: p.requested_models.clone(),
                 version: p.version.clone(),
@@ -1900,6 +1937,7 @@ impl Node {
             vram_bytes: self.vram_bytes,
             model_source: my_source,
             serving: my_serving,
+            serving_models: my_serving_models,
             available_models: my_available,
             requested_models: my_requested,
             version: Some(crate::VERSION.to_string()),
