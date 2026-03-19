@@ -1646,10 +1646,16 @@ impl Node {
             }
         }
 
-        // Try to establish direct connections to new peers (only on initial join)
+        // Try to establish direct connections to new peers (only on initial join).
+        // Clients skip other clients — they only need connections to hosts/workers
+        // for tunneling inference requests. This avoids O(clients²) connections.
         if discover_peers {
+            let is_client = matches!(*self.role.lock().await, NodeRole::Client);
             for ann in &their_announcements {
                 if ann.addr.id != self.endpoint.id() {
+                    if is_client && matches!(ann.role, NodeRole::Client) {
+                        continue;
+                    }
                     let has_conn = self.state.lock().await.connections.contains_key(&ann.addr.id);
                     if !has_conn {
                         if let Err(e) = Box::pin(self.connect_to_peer(ann.addr.clone())).await {
