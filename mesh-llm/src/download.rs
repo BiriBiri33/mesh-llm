@@ -596,8 +596,9 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let max_retries = 100;
-    for attempt in 1..=max_retries {
+    let mut attempt: u64 = 0;
+    loop {
+        attempt += 1;
         // Check how much we already have (for resume)
         let existing_bytes = if tmp.exists() {
             tokio::fs::metadata(&tmp).await?.len()
@@ -605,28 +606,31 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
             0
         };
 
-        eprintln!(
-            "  attempt {attempt}/{max_retries}{}...",
-            if existing_bytes > 0 {
-                format!(" (resuming from {:.1}MB)", existing_bytes as f64 / 1e6)
-            } else {
-                String::new()
-            }
-        );
+        if attempt <= 3 || attempt % 10 == 0 {
+            eprintln!(
+                "  attempt {attempt}{}...",
+                if existing_bytes > 0 {
+                    format!(" (resuming from {:.1}MB)", existing_bytes as f64 / 1e6)
+                } else {
+                    String::new()
+                }
+            );
+        }
 
         let mut request = client.get(url);
         if existing_bytes > 0 {
             request = request.header("Range", format!("bytes={existing_bytes}-"));
         }
 
+        // Exponential backoff: 3s, 6s, 12s, ... capped at 60s
+        let backoff_secs = std::cmp::min(3 * (1u64 << (attempt - 1).min(4)), 60);
+
         let response = match request.send().await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  connection failed: {e}");
-                if attempt < max_retries {
-                    eprintln!("  retrying in 3s...");
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                }
+                eprintln!("  retrying in {backoff_secs}s...");
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 continue;
             }
         };
@@ -639,7 +643,9 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
                 eprintln!("  server rejected resume, starting fresh...");
                 continue;
             }
-            anyhow::bail!("HTTP {status} downloading {url}");
+            eprintln!("  HTTP {status}, retrying in {backoff_secs}s...");
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            continue;
         }
 
         // Total size from Content-Length (or Content-Range)
@@ -654,6 +660,25 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
         } else {
             response.content_length().map(|cl| cl + existing_bytes)
         };
+
+        // On first successful response, check disk space
+        if attempt == 1 || existing_bytes == 0 {
+            if let Some(total) = total_bytes {
+                let remaining = total.saturating_sub(existing_bytes);
+                if let Some(free) = free_disk_space(dest) {
+                    // Need remaining bytes + 1GB headroom
+                    let needed = remaining + 1_000_000_000;
+                    if free < needed {
+                        anyhow::bail!(
+                            "Not enough disk space: need {:.1}GB but only {:.1}GB free on {}",
+                            needed as f64 / 1e9,
+                            free as f64 / 1e9,
+                            dest.parent().unwrap_or(dest).display()
+                        );
+                    }
+                }
+            }
+        }
 
         // Open file for append (resume) or create
         let mut file = tokio::fs::OpenOptions::new()
@@ -670,6 +695,9 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
         // Print initial progress
         print_progress(downloaded, total_bytes);
 
+        // Reset backoff on successful data receipt
+        let mut got_data = false;
+
         loop {
             match stream.next().await {
                 Some(Ok(chunk)) => {
@@ -677,6 +705,7 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
                         .await
                         .context("Failed to write chunk")?;
                     downloaded += chunk.len() as u64;
+                    got_data = true;
 
                     // Update progress every 500ms
                     if last_progress.elapsed() >= std::time::Duration::from_millis(500) {
@@ -691,10 +720,13 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
                         "  download interrupted at {:.1}MB: {e}",
                         downloaded as f64 / 1e6
                     );
-                    if attempt < max_retries {
-                        eprintln!("  retrying in 3s (will resume)...");
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // If we got data, reset attempt counter (connection was working)
+                    if got_data {
+                        attempt = 0;
                     }
+                    let retry_secs = std::cmp::min(3 * (1u64 << attempt.min(4)), 60);
+                    eprintln!("  retrying in {retry_secs}s (will resume)...");
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_secs)).await;
                     break;
                 }
                 None => {
@@ -711,9 +743,38 @@ async fn download_with_resume(dest: &Path, url: &str) -> Result<()> {
             }
         }
     }
+}
 
-    // Keep partial file for resume on next run
-    anyhow::bail!("Download failed after {max_retries} attempts (partial file kept for resume)");
+/// Check free disk space on the filesystem containing `path`.
+/// Returns None if the check fails (e.g. path doesn't exist yet).
+fn free_disk_space(path: &Path) -> Option<u64> {
+    // Walk up to find an existing directory for statvfs
+    let mut check = path.to_path_buf();
+    loop {
+        if check.exists() {
+            break;
+        }
+        if !check.pop() {
+            return None;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(check.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+        if ret == 0 {
+            // f_bavail = blocks available to unprivileged users
+            Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 fn print_progress(downloaded: u64, total: Option<u64>) {
@@ -741,5 +802,20 @@ pub fn list_models() {
             "  {:40} {:>6}  {}{}",
             m.name, m.size, m.description, draft_info
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_free_disk_space() {
+        // Should return Some for an existing path
+        let free = free_disk_space(std::path::Path::new("/tmp/test_file.gguf"));
+        assert!(free.is_some(), "should get free space for /tmp");
+        let bytes = free.unwrap();
+        assert!(bytes > 1_000_000_000, "should have >1GB free, got {bytes}");
+        eprintln!("Free disk space on /tmp: {:.1} GB", bytes as f64 / 1e9);
     }
 }
