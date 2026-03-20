@@ -1568,11 +1568,11 @@ function ChatPage(props: {
   function handleImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    // Resize to max 1024px on longest side — vision encoders don't need retina resolution
-    // and large images can OOM smaller llama-server instances
+    // Resize to max 512px on longest side — vision encoders tile to ~448px internally
+    // and larger images produce too many tokens for constrained contexts (n_ubatch=512)
     const img = new Image();
     img.onload = () => {
-      const MAX = 1024;
+      const MAX = 512;
       let { width, height } = img;
       if (width > MAX || height > MAX) {
         const scale = MAX / Math.max(width, height);

@@ -233,6 +233,9 @@ pub async fn start_llama_server(
         if proj.exists() {
             args.push("--mmproj".to_string());
             args.push(proj.to_string_lossy().to_string());
+            // Vision images can produce large token batches — need ubatch >= 2048
+            args.push("--ubatch-size".to_string());
+            args.push("2048".to_string());
             tracing::info!("Vision: mmproj={}", proj.display());
         } else {
             tracing::warn!("mmproj not found at {}, skipping vision", proj.display());
