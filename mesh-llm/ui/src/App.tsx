@@ -2991,11 +2991,25 @@ function ChatBubble({
           {message.model ? <span>· {shortName(message.model)}</span> : null}
         </div>
 
-        {/* Thinking indicator — shown above the response */}
+        {/* Thinking indicator — click to expand and watch reasoning stream live */}
         {isThinking ? (
-          <div className="mb-2 flex items-center gap-2 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>Thinking…</span>
+          <div className="mb-2 rounded-lg border border-dashed">
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => onReasoningToggle(!reasoningOpen)}
+            >
+              <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+              <span>Thinking…</span>
+              <ChevronDown className={cn('ml-auto h-3 w-3 transition-transform', reasoningOpen ? '' : '-rotate-90')} />
+            </button>
+            {reasoningOpen && message.reasoning ? (
+              <div className="border-t border-dashed px-3 pb-2 pt-1">
+                <ScrollArea className="max-h-60">
+                  <div className="whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{message.reasoning}</div>
+                </ScrollArea>
+              </div>
+            ) : null}
           </div>
         ) : null}
 

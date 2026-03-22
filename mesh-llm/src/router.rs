@@ -547,6 +547,26 @@ pub fn pick_model_classified<'a>(
         .collect();
 
     scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // For non-agentic requests, spread load across top-scoring models.
+    // Pick randomly among candidates within 50 points of the best score.
+    // This avoids queueing all concurrent chat users on the same model.
+    if !classification.needs_tools && scored.len() > 1 {
+        let best_score = scored[0].1;
+        let top_tier: Vec<&(&str, i32)> = scored.iter()
+            .filter(|(_, s)| best_score - s <= 50)
+            .collect();
+        if top_tier.len() > 1 {
+            // Simple pseudo-random: use current time nanos to pick
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as usize;
+            let pick = top_tier[nanos % top_tier.len()];
+            return Some(pick.0);
+        }
+    }
+
     scored.first().map(|(name, _)| *name)
 }
 
