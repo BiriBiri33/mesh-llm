@@ -2222,7 +2222,7 @@ async fn run_knowledge(
         eprintln!("No mesh-llm node running on port {port}.");
         eprintln!();
         eprintln!("Knowledge requires a running mesh. Start one with --knowledge:");
-        eprintln!("  Private mesh:  mesh-llm --client --knowledge");
+        eprintln!("  Private mesh:  mesh-llm --client --knowledge  (share the join token printed out)");
         eprintln!("  Join a mesh:   mesh-llm --client --knowledge --join <token>");
         eprintln!("  Public mesh:   mesh-llm --client --knowledge --auto");
         eprintln!();
