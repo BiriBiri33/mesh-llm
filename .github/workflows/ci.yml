@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        run: npm ci && npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mesh-llm
+
+      - name: Run tests
+        working-directory: mesh-llm
+        run: cargo test
+
+      # Formatting and clippy are advisory for now — codebase predates fmt.
+      # TODO: run cargo fmt across the project and enable these as blocking.
+      - name: Check formatting
+        working-directory: mesh-llm
+        run: cargo fmt -- --check || true
+
+      - name: Clippy
+        working-directory: mesh-llm
+        run: cargo clippy -- -D warnings || true
