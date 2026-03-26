@@ -14,7 +14,20 @@ Pool spare GPU capacity to run LLMs at larger scale. Models that don't fit on on
 curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz | tar xz && mv mesh-bundle/* ~/.local/bin/
 ```
 
-Then run:
+## Install (Linux)
+
+No pre-built binaries yet, build from source:
+
+```bash
+git clone https://github.com/michaelneale/mesh-llm
+cd mesh-llm
+just build
+```
+
+Requires: `just`, `cmake`, `nvcc`, Rust toolchain, Node.js + npm. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+## Run
+Once installed, you can run:
 
 ```bash
 mesh-llm --auto                            # join the best public mesh, start serving

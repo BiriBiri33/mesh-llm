@@ -7,8 +7,17 @@ ui_dir := mesh_dir / "ui"
 models_dir := env("HOME") / ".models"
 model := models_dir / "GLM-4.7-Flash-Q4_K_M.gguf"
 
-# Clone and build the patched llama.cpp fork + mesh-llm
-build:
+# Build for the current platform (macOS→Metal, Linux→CUDA with auto-detected arch)
+[macos]
+build: build-mac
+
+# Pass cuda_arch to override auto-detection (e.g. just build cuda_arch=90)
+[linux]
+build cuda_arch="":
+    @scripts/build-linux.sh "{{cuda_arch}}"
+
+# Build on macOS Apple Silicon (Metal + RPC)
+build-mac:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ ! -d "{{llama_dir}}" ]; then
@@ -37,6 +46,11 @@ build:
         (cd "{{mesh_dir}}" && cargo build --release)
         echo "Mesh binary: {{mesh_dir}}/target/release/mesh-llm"
     fi
+
+# Build on Linux with CUDA — delegates to scripts/build-linux.sh
+# cuda_arch overrides auto-detection (see scripts/detect-cuda-arch.sh for supported GPUs)
+build-linux cuda_arch="":
+    @scripts/build-linux.sh "{{cuda_arch}}"
 
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:

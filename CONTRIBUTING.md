@@ -4,11 +4,14 @@ This file covers local build and development workflows for this repository.
 
 ## Prerequisites
 
-- macOS Apple Silicon for the default local workflow
 - `just`
 - `cmake`
 - Rust toolchain (`cargo`)
 - Node.js + npm (for UI development)
+
+**macOS**: Apple Silicon. Metal is used automatically.
+
+**Linux**: x86_64 with an NVIDIA GPU. Requires the CUDA toolkit (`nvcc` in your `PATH`). On Arch Linux, CUDA is typically at `/opt/cuda`; on Ubuntu/Debian it's at `/usr/local/cuda`. Auto-detection finds the right SM architecture for your GPU.
 
 ## Build from source
 
@@ -16,6 +19,22 @@ Build everything (llama.cpp fork, mesh binary, and UI production build):
 
 ```bash
 just build
+```
+
+On Linux, make sure `nvcc` is in your `PATH` first:
+
+```bash
+# Arch Linux
+PATH=/opt/cuda/bin:$PATH just build
+
+# Ubuntu/Debian
+PATH=/usr/local/cuda/bin:$PATH just build
+```
+
+The build script auto-detects your GPU's CUDA architecture. To override:
+
+```bash
+just build cuda_arch=90   # e.g. H100
 ```
 
 Create a portable bundle:
