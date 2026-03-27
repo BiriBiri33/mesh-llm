@@ -63,6 +63,14 @@ message MeshPeer {
   string peer_id = 1;
   string version = 2;
   repeated string capabilities = 3;
+  string role = 4;
+  uint64 vram_bytes = 5;
+  repeated string models = 6;
+  repeated string serving_models = 7;
+  repeated string available_models = 8;
+  repeated string requested_models = 9;
+  optional uint32 rtt_ms = 10;
+  string model_source = 11;
 }
 
 message MeshEvent {

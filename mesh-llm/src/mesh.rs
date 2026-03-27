@@ -46,6 +46,44 @@ fn new_plugin_message_id(source_peer_id: &str) -> String {
     format!("{source_peer_id}:{nanos}:{}", rand::random::<u64>())
 }
 
+fn node_role_label(role: &NodeRole) -> String {
+    match role {
+        NodeRole::Worker => "worker".into(),
+        NodeRole::Host { .. } => "host".into(),
+        NodeRole::Client => "client".into(),
+    }
+}
+
+fn peer_info_to_mesh_peer(peer: &PeerInfo) -> crate::plugin::proto::MeshPeer {
+    crate::plugin::proto::MeshPeer {
+        peer_id: endpoint_id_hex(peer.id),
+        version: peer.version.clone().unwrap_or_default(),
+        capabilities: Vec::new(),
+        role: node_role_label(&peer.role),
+        vram_bytes: peer.vram_bytes,
+        models: peer.models.clone(),
+        serving_models: peer.serving_models.clone(),
+        available_models: peer.available_models.clone(),
+        requested_models: peer.requested_models.clone(),
+        rtt_ms: peer.rtt_ms,
+        model_source: peer.model_source.clone().unwrap_or_default(),
+    }
+}
+
+fn peer_meaningfully_changed(old: &PeerInfo, new: &PeerInfo) -> bool {
+    old.addr != new.addr
+        || old.role != new.role
+        || old.models != new.models
+        || old.vram_bytes != new.vram_bytes
+        || old.rtt_ms != new.rtt_ms
+        || old.model_source != new.model_source
+        || old.serving != new.serving
+        || old.serving_models != new.serving_models
+        || old.available_models != new.available_models
+        || old.requested_models != new.requested_models
+        || old.version != new.version
+}
+
 /// Merge two demand maps. For each model, take max of last_active and request_count.
 pub fn merge_demand(
     ours: &mut HashMap<String, ModelDemand>,
@@ -695,7 +733,25 @@ impl Node {
     }
 
     pub async fn set_plugin_manager(&self, plugin_manager: crate::plugin::PluginManager) {
-        *self.plugin_manager.lock().await = Some(plugin_manager);
+        let peers = {
+            let state = self.state.lock().await;
+            state.peers.values().cloned().collect::<Vec<_>>()
+        };
+        *self.plugin_manager.lock().await = Some(plugin_manager.clone());
+        for peer in peers {
+            if let Err(err) = plugin_manager
+                .broadcast_mesh_event(crate::plugin::proto::MeshEvent {
+                    kind: crate::plugin::proto::mesh_event::Kind::PeerUp as i32,
+                    peer: Some(peer_info_to_mesh_peer(&peer)),
+                })
+                .await
+            {
+                tracing::debug!(
+                    "Failed to send existing peer snapshot to plugins for {}: {err}",
+                    peer.id.fmt_short()
+                );
+            }
+        }
     }
 
     pub fn start_plugin_channel_forwarder(
@@ -710,6 +766,46 @@ impl Node {
                 }
             }
         });
+    }
+
+    async fn emit_plugin_mesh_event(
+        &self,
+        kind: crate::plugin::proto::mesh_event::Kind,
+        peer: &PeerInfo,
+    ) {
+        let plugin_manager = self.plugin_manager.lock().await.clone();
+        if let Some(plugin_manager) = plugin_manager {
+            if let Err(err) = plugin_manager
+                .broadcast_mesh_event(crate::plugin::proto::MeshEvent {
+                    kind: kind as i32,
+                    peer: Some(peer_info_to_mesh_peer(peer)),
+                })
+                .await
+            {
+                tracing::debug!(
+                    "Failed to deliver plugin mesh event {:?} for {}: {err}",
+                    kind,
+                    peer.id.fmt_short()
+                );
+            }
+        }
+    }
+
+    async fn update_peer_rtt(&self, id: EndpointId, rtt_ms: u32) {
+        let updated_peer = {
+            let mut state = self.state.lock().await;
+            if let Some(peer) = state.peers.get_mut(&id) {
+                peer.rtt_ms = Some(rtt_ms);
+                Some(peer.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(peer) = updated_peer {
+            tracing::info!("Peer {} RTT: {}ms", id.fmt_short(), rtt_ms);
+            self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerUpdated, &peer)
+                .await;
+        }
     }
 
     /// Re-gossip our state to all connected peers.
@@ -2109,11 +2205,7 @@ impl Node {
                 }
                 self.merge_remote_demand(&ann.model_demand);
                 self.add_peer(remote, ann.addr.clone(), ann).await;
-                let mut state = self.state.lock().await;
-                if let Some(peer) = state.peers.get_mut(&remote) {
-                    peer.rtt_ms = Some(rtt_ms);
-                    tracing::info!("Peer {} RTT: {}ms", remote.fmt_short(), rtt_ms);
-                }
+                self.update_peer_rtt(remote, rtt_ms).await;
             } else {
                 self.update_transitive_peer(ann.addr.id, &ann.addr, ann).await;
             }
@@ -2207,10 +2299,7 @@ impl Node {
                         let path_type = if path_info.is_ip() { "direct" } else { "relay" };
                         if rtt_ms > 0 {
                             eprintln!("📡 Peer {} RTT: {}ms ({})", remote.fmt_short(), rtt_ms, path_type);
-                            let mut state = self.state.lock().await;
-                            if let Some(peer) = state.peers.get_mut(&remote) {
-                                peer.rtt_ms = Some(rtt_ms);
-                            }
+                            self.update_peer_rtt(remote, rtt_ms).await;
                         }
                         break;
                     }
@@ -2275,11 +2364,13 @@ impl Node {
 
     async fn remove_peer(&self, id: EndpointId) {
         let mut state = self.state.lock().await;
-        if state.peers.remove(&id).is_some() {
+        if let Some(peer) = state.peers.remove(&id) {
             tracing::info!("Peer removed: {} (total: {})", id.fmt_short(), state.peers.len());
             let count = state.peers.len();
             drop(state);
             let _ = self.peer_change_tx.send(count);
+            self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerDown, &peer)
+                .await;
         }
     }
 
@@ -2292,6 +2383,7 @@ impl Node {
             eprintln!("🔄 Peer {} back from the dead (successful gossip)", id.fmt_short());
         }
         if let Some(existing) = state.peers.get_mut(&id) {
+            let old_peer = existing.clone();
             let role_changed = existing.role != ann.role;
             let serving_changed = existing.serving != ann.serving;
             if role_changed {
@@ -2313,20 +2405,41 @@ impl Node {
             existing.requested_models = ann.requested_models.clone();
             existing.last_seen = std::time::Instant::now();
             if ann.version.is_some() { existing.version = ann.version.clone(); }
+<<<<<<< HEAD
             existing.gpu_name = ann.gpu_name.clone();
             existing.hostname = ann.hostname.clone();
             existing.is_soc = ann.is_soc;
             existing.gpu_vram = ann.gpu_vram.clone();
+=======
+            let updated_peer = existing.clone();
+            let changed = peer_meaningfully_changed(&old_peer, &updated_peer);
+>>>>>>> 91de535 (Send richer peer events to plugins)
             if role_changed || serving_changed {
                 let count = state.peers.len();
                 drop(state);
                 let _ = self.peer_change_tx.send(count);
+                if changed {
+                    self.emit_plugin_mesh_event(
+                        crate::plugin::proto::mesh_event::Kind::PeerUpdated,
+                        &updated_peer,
+                    )
+                    .await;
+                }
+            } else {
+                drop(state);
+                if changed {
+                    self.emit_plugin_mesh_event(
+                        crate::plugin::proto::mesh_event::Kind::PeerUpdated,
+                        &updated_peer,
+                    )
+                    .await;
+                }
             }
             return;
         }
         tracing::info!("Peer added: {} role={:?} vram={:.1}GB serving={:?} available={:?} (total: {})",
             id.fmt_short(), ann.role, ann.vram_bytes as f64 / 1e9, ann.serving, ann.available_models, state.peers.len() + 1);
-        state.peers.insert(id, PeerInfo {
+        let peer = PeerInfo {
             id, addr, tunnel_port: None,
             role: ann.role.clone(),
             models: ann.models.clone(),
@@ -2339,14 +2452,21 @@ impl Node {
             requested_models: ann.requested_models.clone(),
             last_seen: std::time::Instant::now(),
             version: ann.version.clone(),
+<<<<<<< HEAD
             gpu_name: ann.gpu_name.clone(),
             hostname: ann.hostname.clone(),
             is_soc: ann.is_soc,
             gpu_vram: ann.gpu_vram.clone(),
         });
+=======
+        };
+        state.peers.insert(id, peer.clone());
+>>>>>>> 91de535 (Send richer peer events to plugins)
         let count = state.peers.len();
         drop(state);
         let _ = self.peer_change_tx.send(count);
+        self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerUp, &peer)
+            .await;
     }
 
     /// Update a peer learned transitively through gossip (not directly connected).
@@ -2359,6 +2479,7 @@ impl Node {
         if id == self.endpoint.id() { return; }
         if state.dead_peers.contains(&id) { return; }
         if let Some(existing) = state.peers.get_mut(&id) {
+            let old_peer = existing.clone();
             // Update serving info only — don't touch last_seen
             let serving_changed = existing.serving != ann.serving
                 || existing.serving_models != ann.serving_models;
@@ -2372,15 +2493,33 @@ impl Node {
             if ann.hostname.is_some() { existing.hostname = ann.hostname.clone(); }
             if ann.is_soc.is_some() { existing.is_soc = ann.is_soc; }
             if ann.gpu_vram.is_some() { existing.gpu_vram = ann.gpu_vram.clone(); }
+            let updated_peer = existing.clone();
+            let changed = peer_meaningfully_changed(&old_peer, &updated_peer);
             if serving_changed {
                 let count = state.peers.len();
                 drop(state);
                 let _ = self.peer_change_tx.send(count);
+                if changed {
+                    self.emit_plugin_mesh_event(
+                        crate::plugin::proto::mesh_event::Kind::PeerUpdated,
+                        &updated_peer,
+                    )
+                    .await;
+                }
+            } else {
+                drop(state);
+                if changed {
+                    self.emit_plugin_mesh_event(
+                        crate::plugin::proto::mesh_event::Kind::PeerUpdated,
+                        &updated_peer,
+                    )
+                    .await;
+                }
             }
         } else {
             // New transitive peer — add with last_seen = now but no peer_change event.
             // It will get pruned after PEER_STALE_SECS*2 if never directly contacted.
-            state.peers.insert(id, PeerInfo {
+            let peer = PeerInfo {
                 id, addr: addr.clone(), tunnel_port: None,
                 role: ann.role.clone(),
                 models: ann.models.clone(),
@@ -2397,7 +2536,11 @@ impl Node {
                 hostname: ann.hostname.clone(),
                 is_soc: ann.is_soc,
                 gpu_vram: ann.gpu_vram.clone(),
-            });
+            };
+            state.peers.insert(id, peer.clone());
+            drop(state);
+            self.emit_plugin_mesh_event(crate::plugin::proto::mesh_event::Kind::PeerUp, &peer)
+                .await;
         }
     }
 

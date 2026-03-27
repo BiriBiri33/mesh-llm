@@ -269,6 +269,33 @@ The plugin must provide:
 
 The host currently requires protocol version equality.
 
+### Mesh Events
+
+The host can send `MeshEvent` envelopes into every running plugin.
+
+Current event kinds:
+
+- `PEER_UP`
+- `PEER_DOWN`
+- `PEER_UPDATED`
+
+Each event carries a `MeshPeer` snapshot.
+
+The current `MeshPeer` payload includes:
+
+- `peer_id`
+- `version`
+- `role`
+- `vram_bytes`
+- `models`
+- `serving_models`
+- `available_models`
+- `requested_models`
+- `rtt_ms`
+- `model_source`
+
+Plugins should treat these events as advisory runtime state from the local host.
+
 ### Tool Schemas
 
 Tool schemas are advertised in `InitializeResponse.tool_schemas`.
@@ -473,7 +500,7 @@ The current plugin system is functional, but not finished.
 
 Known gaps:
 
-1. Host-side delivery of richer peer and mesh events into plugins is still limited.
+1. Mesh events currently cover peer lifecycle snapshots, but broader topology and cluster-level signaling is still limited.
 2. Restart policy and crash supervision are not implemented.
 3. A standalone example plugin outside the main `mesh-llm` executable is still missing.
 4. Cross-platform transport testing, especially Windows named pipes, needs more coverage.

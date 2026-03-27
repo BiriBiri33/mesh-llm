@@ -320,6 +320,13 @@ impl PluginManager {
         };
         plugin.send_bulk_transfer_message(message).await
     }
+
+    pub async fn broadcast_mesh_event(&self, event: proto::MeshEvent) -> Result<()> {
+        for plugin in self.inner.plugins.values() {
+            plugin.send_mesh_event(event.clone()).await?;
+        }
+        Ok(())
+    }
 }
 
 impl ExternalPlugin {
@@ -483,6 +490,18 @@ impl ExternalPlugin {
             })
             .await
             .map_err(|_| anyhow!("Plugin '{}' is not accepting bulk transfers", self.summary.name))
+    }
+
+    async fn send_mesh_event(&self, event: proto::MeshEvent) -> Result<()> {
+        self.outbound_tx
+            .send(proto::Envelope {
+                protocol_version: PROTOCOL_VERSION,
+                plugin_id: self.summary.name.clone(),
+                request_id: 0,
+                payload: Some(proto::envelope::Payload::MeshEvent(event)),
+            })
+            .await
+            .map_err(|_| anyhow!("Plugin '{}' is not accepting mesh events", self.summary.name))
     }
 
     async fn request(&self, payload: proto::envelope::Payload) -> Result<proto::Envelope> {
@@ -983,6 +1002,9 @@ async fn run_blackboard_plugin(name: String, mut stream: LocalStream) -> Result<
                         }
                     }
                 }
+            }
+            Some(proto::envelope::Payload::MeshEvent(_)) => {
+                continue;
             }
             _ => {
                 let response = proto::Envelope {
