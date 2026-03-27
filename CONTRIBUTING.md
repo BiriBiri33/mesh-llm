@@ -51,6 +51,30 @@ To override the AMD GPU target list:
 just build backend=rocm rocm_arch="gfx90a;gfx942;gfx1100"
 ```
 
+To run the ROCm build inside Docker on a Linux AMD host with `/dev/kfd` and `/dev/dri` available:
+
+```bash
+scripts/run-rocm-docker-build.sh
+```
+
+To force a specific ROCm target list in the container:
+
+```bash
+scripts/run-rocm-docker-build.sh --rocm-arch "gfx942"
+```
+
+To do a compile-only ROCm Docker build from a non-ROCm host, skip device access:
+
+```bash
+scripts/run-rocm-docker-build.sh --build-only
+```
+
+There is also a `just` wrapper for the same pattern:
+
+```bash
+just release-rocm-docker
+```
+
 Create a portable bundle:
 
 ```bash
