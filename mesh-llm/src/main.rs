@@ -21,7 +21,7 @@ pub use plugins::blackboard::mcp as blackboard_mcp;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mesh::NodeRole;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = "0.48.0";
 
@@ -2138,19 +2138,32 @@ fn first_available_target(targets: &election::ModelTargets) -> election::Inferen
     election::InferenceTarget::None
 }
 
+fn bundled_bin_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn has_bundled_llama_bins(dir: &Path) -> bool {
+    dir.join(bundled_bin_name("rpc-server")).exists()
+        && dir.join(bundled_bin_name("llama-server")).exists()
+}
+
 fn detect_bin_dir() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("Failed to determine own binary path")?;
     let dir = exe.parent().context("Binary has no parent directory")?;
 
-    if dir.join("rpc-server").exists() && dir.join("llama-server").exists() {
+    if has_bundled_llama_bins(dir) {
         return Ok(dir.to_path_buf());
     }
     let dev = dir.join("../llama.cpp/build/bin");
-    if dev.join("rpc-server").exists() && dev.join("llama-server").exists() {
+    if has_bundled_llama_bins(&dev) {
         return Ok(dev.canonicalize()?);
     }
     let cargo = dir.join("../../../llama.cpp/build/bin");
-    if cargo.join("rpc-server").exists() && cargo.join("llama-server").exists() {
+    if has_bundled_llama_bins(&cargo) {
         return Ok(cargo.canonicalize()?);
     }
 
@@ -2471,8 +2484,13 @@ fn run_stop() -> Result<()> {
     use std::process::Command as Cmd;
     let mut killed = 0u32;
     for name in &["mesh-llm", "llama-server", "rpc-server"] {
-        // pkill sends SIGTERM; ignore errors (process might not exist)
-        let status = Cmd::new("pkill").arg("-f").arg(name).status();
+        let status = if cfg!(windows) {
+            let image_name = format!("{name}.exe");
+            Cmd::new("taskkill").args(["/IM", &image_name, "/F"]).status()
+        } else {
+            // pkill sends SIGTERM; ignore errors (process might not exist)
+            Cmd::new("pkill").arg("-f").arg(name).status()
+        };
         match status {
             Ok(s) if s.success() => {
                 eprintln!("🧹 Stopped {name}");

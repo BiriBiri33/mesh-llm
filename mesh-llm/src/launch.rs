@@ -4,9 +4,21 @@
 //! wired up to the mesh tunnel ports.
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::net::TcpListener;
 use tokio::process::Command;
+
+fn bin_path(bin_dir: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) {
+        bin_dir.join(format!("{name}.exe"))
+    } else {
+        bin_dir.join(name)
+    }
+}
+
+fn temp_log_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(name)
+}
 
 /// Start a local rpc-server and return the port it's listening on.
 /// Picks an available port automatically.
@@ -16,7 +28,7 @@ pub async fn start_rpc_server(
     device: Option<&str>,
     gguf_path: Option<&Path>,
 ) -> Result<u16> {
-    let rpc_server = bin_dir.join("rpc-server");
+    let rpc_server = bin_path(bin_dir, "rpc-server");
     anyhow::ensure!(
         rpc_server.exists(),
         "rpc-server not found at {}. Build llama.cpp with -DGGML_RPC=ON first.",
@@ -30,9 +42,9 @@ pub async fn start_rpc_server(
 
     tracing::info!("Starting rpc-server on :{port} (device: {device})");
 
-    let rpc_log = format!("/tmp/mesh-llm-rpc-{port}.log");
+    let rpc_log = temp_log_path(&format!("mesh-llm-rpc-{port}.log"));
     let rpc_log_file = std::fs::File::create(&rpc_log)
-        .with_context(|| format!("Failed to create rpc-server log file {rpc_log}"))?;
+        .with_context(|| format!("Failed to create rpc-server log file {}", rpc_log.display()))?;
     let rpc_log_file2 = rpc_log_file.try_clone()?;
 
     let mut args = vec![
@@ -76,6 +88,12 @@ pub async fn start_rpc_server(
 /// Only kills rpc-servers with PPID 1 (parent died, adopted by init).
 /// Safe to call while a live mesh-llm has its own rpc-server child.
 pub async fn kill_orphan_rpc_servers() {
+    #[cfg(windows)]
+    {
+        return;
+    }
+
+    #[cfg(not(windows))]
     if let Ok(output) = std::process::Command::new("ps")
         .args(["-eo", "pid,ppid,comm"])
         .output()
@@ -102,6 +120,16 @@ pub async fn kill_orphan_rpc_servers() {
 
 /// Kill all running llama-server processes.
 pub async fn kill_llama_server() {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/IM", "llama-server.exe", "/F"])
+            .status();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        return;
+    }
+
+    #[cfg(not(windows))]
     let _ = std::process::Command::new("pkill")
         .args(["-f", "llama-server"])
         .status();
@@ -147,7 +175,7 @@ pub async fn start_llama_server(
     ctx_size_override: Option<u32>,
     total_group_vram: Option<u64>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>> {
-    let llama_server = bin_dir.join("llama-server");
+    let llama_server = bin_path(bin_dir, "llama-server");
     anyhow::ensure!(
         llama_server.exists(),
         "llama-server not found at {}. Build llama.cpp first.",
@@ -169,8 +197,9 @@ pub async fn start_llama_server(
         rpc_arg
     );
 
-    let log_file = std::fs::File::create("/tmp/mesh-llm-llama-server.log")
-        .context("Failed to create llama-server log file")?;
+    let llama_log = temp_log_path("mesh-llm-llama-server.log");
+    let log_file = std::fs::File::create(&llama_log)
+        .with_context(|| format!("Failed to create llama-server log file {}", llama_log.display()))?;
     let log_file2 = log_file.try_clone()?;
 
     // llama-server uses --rpc only for remote workers.

@@ -55,41 +55,29 @@ git tag v0.X.0
 git push origin main --tags
 ```
 
-### 6. Create GitHub release
+### 6. Let GitHub Actions build and publish the release
 
-```bash
-VERSION=v0.X.0
-cp /tmp/mesh-bundle.tar.gz /tmp/mesh-llm-${VERSION}-aarch64-apple-darwin.tar.gz
-cp /tmp/mesh-bundle.tar.gz /tmp/mesh-bundle.tar.gz
+Pushing a `v*` tag triggers `.github/workflows/release.yml`, which:
 
-gh release create ${VERSION} \
-  /tmp/mesh-llm-${VERSION}-aarch64-apple-darwin.tar.gz \
-  /tmp/mesh-bundle.tar.gz \
-  --title "mesh-llm ${VERSION}" \
-  --notes "## What's new
+- builds release bundles on macOS, Linux, and Windows
+- uploads versioned assets such as `mesh-llm-v0.X.0-aarch64-apple-darwin.tar.gz`
+- uploads stable `latest` assets such as `mesh-llm-x86_64-unknown-linux-gnu.tar.gz`
+- keeps the legacy macOS `mesh-bundle.tar.gz` asset for the README install one-liner
+- creates the GitHub release automatically with generated notes
 
-- <changelog here>
+### 7. Verify the release assets
 
-### Install (macOS Apple Silicon)
+After the workflow finishes, verify:
 
-\`\`\`bash
-curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz | tar xz && mv mesh-bundle/* ~/.local/bin/
-\`\`\`
-"
-```
-
-Two assets are uploaded: one with the version in the name (for pinning), one without (for the `latest` URL used in the README).
-
-### 7. Verify the install one-liner works
-
-```bash
-curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-bundle.tar.gz | tar xz && mv mesh-bundle/* ~/.local/bin/
-mesh-llm --model Qwen2.5-3B --console
-```
+- `mesh-bundle.tar.gz` still exists for macOS latest installs
+- `mesh-llm-aarch64-apple-darwin.tar.gz` exists
+- `mesh-llm-x86_64-unknown-linux-gnu.tar.gz` exists
+- `mesh-llm-x86_64-pc-windows-msvc.zip` exists
 
 ## Notes
 
-- The unversioned asset name (`mesh-bundle.tar.gz`) is what the README's install one-liner uses via the `/latest/download/` URL. It must be uploaded with every release.
+- The unversioned asset name `mesh-bundle.tar.gz` is still required for the README's macOS install one-liner.
+- Linux and Windows release bundles are built on GitHub-hosted runners without CUDA, so they are generic CPU bundles. CUDA-specific Linux builds still need a source build.
 - `codesign` and `xattr` may be needed on the receiving machine if macOS Gatekeeper blocks unsigned binaries:
   ```bash
   codesign -s - /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server

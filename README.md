@@ -16,7 +16,11 @@ curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mes
 
 ## Install (Linux)
 
-No pre-built binaries yet, build from source:
+```bash
+curl -fsSL https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-llm-x86_64-unknown-linux-gnu.tar.gz | tar xz && mkdir -p ~/.local/bin && mv mesh-bundle/* ~/.local/bin/
+```
+
+The GitHub release bundle is a generic CPU build. For NVIDIA CUDA builds, build from source:
 
 ```bash
 git clone https://github.com/michaelneale/mesh-llm
@@ -25,6 +29,15 @@ just build
 ```
 
 Requires: `just`, `cmake`, Rust toolchain, Node.js + npm. NVIDIA GPU builds need `nvcc` (CUDA toolkit). CPU-only and Jetson/Tegra also work. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+## Install (Windows)
+
+Download and extract:
+
+```powershell
+curl.exe -L https://github.com/michaelneale/mesh-llm/releases/latest/download/mesh-llm-x86_64-pc-windows-msvc.zip -o mesh-llm.zip
+tar -xf mesh-llm.zip
+```
 
 ## Run
 Once installed, you can run:
