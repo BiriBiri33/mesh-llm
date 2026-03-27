@@ -199,9 +199,48 @@ impl PluginManager {
         specs: &ResolvedPlugins,
         mesh_tx: mpsc::Sender<PluginChannelEvent>,
     ) -> Result<Self> {
+        if specs.externals.is_empty() {
+            tracing::info!("Plugin manager: no plugins enabled");
+        } else {
+            let names = specs
+                .externals
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::info!(
+                "Plugin manager: loading {} plugin(s): {}",
+                specs.externals.len(),
+                names
+            );
+        }
+
         let mut plugins = BTreeMap::new();
         for spec in &specs.externals {
-            let plugin = ExternalPlugin::spawn(spec, mesh_tx.clone()).await?;
+            tracing::info!(
+                plugin = %spec.name,
+                command = %spec.command,
+                args = %format_args_for_log(&spec.args),
+                "Loading plugin"
+            );
+            let plugin = match ExternalPlugin::spawn(spec, mesh_tx.clone()).await {
+                Ok(plugin) => plugin,
+                Err(err) => {
+                    tracing::error!(
+                        plugin = %spec.name,
+                        error = %err,
+                        "Plugin failed to load"
+                    );
+                    return Err(err);
+                }
+            };
+            tracing::info!(
+                plugin = %plugin.summary.name,
+                version = %plugin.summary.version.as_deref().unwrap_or("unknown"),
+                capabilities = %format_slice_for_log(&plugin.summary.capabilities),
+                tools = %format_tool_names_for_log(&plugin.summary.tools),
+                "Plugin loaded successfully"
+            );
             plugins.insert(spec.name.clone(), plugin);
         }
         Ok(Self {
@@ -265,6 +304,12 @@ impl ExternalPlugin {
         let listener = bind_local_listener(&spec.name).await?;
         let endpoint = listener.endpoint();
         let transport = listener.transport_name();
+        tracing::debug!(
+            plugin = %spec.name,
+            endpoint = %endpoint,
+            transport,
+            "Waiting for plugin connection"
+        );
 
         let mut child = Command::new(&spec.command);
         child.args(&spec.args);
@@ -485,7 +530,11 @@ async fn connection_loop(
     .await;
 
     if let Err(err) = result {
-        tracing::debug!("Plugin '{}' connection closed: {err}", plugin_name);
+        tracing::warn!(
+            plugin = %plugin_name,
+            error = %err,
+            "Plugin connection closed"
+        );
     }
 
     let mut pending = pending.lock().await;
@@ -966,6 +1015,27 @@ fn default_transport() -> &'static str {
     {
         "pipe"
     }
+}
+
+fn format_args_for_log(args: &[String]) -> String {
+    if args.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", args.join(", "))
+    }
+}
+
+fn format_slice_for_log(values: &[String]) -> String {
+    if values.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", values.join(", "))
+    }
+}
+
+fn format_tool_names_for_log(tools: &[ToolSummary]) -> String {
+    let names = tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>();
+    format_slice_for_log(&names)
 }
 
 #[cfg(test)]
