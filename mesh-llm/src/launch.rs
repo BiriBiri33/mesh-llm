@@ -26,6 +26,89 @@ fn log_tail(path: &Path, max_lines: usize) -> String {
     lines[start..].join("\n")
 }
 
+fn parse_available_devices(output: &str) -> Vec<String> {
+    let mut devices = Vec::new();
+    let mut in_devices = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed == "available devices:" {
+            in_devices = true;
+            continue;
+        }
+        if !in_devices || trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, _rest)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        devices.push(name.to_string());
+    }
+
+    devices
+}
+
+fn probe_available_devices(binary: &Path) -> Vec<String> {
+    let Ok(output) = std::process::Command::new(binary)
+        .args(["-d", "__mesh_llm_probe_invalid__", "-p", "0"])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    if !combined.is_empty() && !output.stderr.is_empty() {
+        combined.push('\n');
+    }
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    parse_available_devices(&combined)
+}
+
+fn preferred_device(available: &[String]) -> Option<String> {
+    for candidate in ["MTL0", "CUDA0", "HIP0", "Vulkan0", "CPU"] {
+        if available.iter().any(|device| device == candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    available.first().cloned()
+}
+
+fn resolve_device_for_binary(binary: &Path, requested: Option<&str>) -> Result<String> {
+    let available = probe_available_devices(binary);
+
+    if let Some(device) = requested {
+        if !available.is_empty() && !available.iter().any(|candidate| candidate == device) {
+            anyhow::bail!(
+                "requested device {device} is not supported by {}. Available devices: {}",
+                binary.display(),
+                available.join(", ")
+            );
+        }
+        return Ok(device.to_string());
+    }
+
+    let detected = detect_device();
+    if available.is_empty() || available.iter().any(|candidate| candidate == &detected) {
+        return Ok(detected);
+    }
+
+    if let Some(fallback) = preferred_device(&available) {
+        tracing::warn!(
+            "Auto-detected device {} is not supported by {}. Falling back to {} (available: {}).",
+            detected,
+            binary.display(),
+            fallback,
+            available.join(", ")
+        );
+        return Ok(fallback);
+    }
+
+    Ok(detected)
+}
+
 fn command_has_output(command: &str, args: &[&str]) -> bool {
     let Ok(output) = std::process::Command::new(command).args(args).output() else {
         return false;
@@ -54,7 +137,7 @@ pub async fn start_rpc_server(
     // Find a free port
     let port = find_free_port().await?;
 
-    let device = device.map(|s| s.to_string()).unwrap_or_else(detect_device);
+    let device = resolve_device_for_binary(&rpc_server, device)?;
     let startup_timeout = if device.starts_with("Vulkan") {
         std::time::Duration::from_secs(90)
     } else {
@@ -229,8 +312,12 @@ pub async fn start_llama_server(
     );
 
     let llama_log = temp_log_path("mesh-llm-llama-server.log");
-    let log_file = std::fs::File::create(&llama_log)
-        .with_context(|| format!("Failed to create llama-server log file {}", llama_log.display()))?;
+    let log_file = std::fs::File::create(&llama_log).with_context(|| {
+        format!(
+            "Failed to create llama-server log file {}",
+            llama_log.display()
+        )
+    })?;
     let log_file2 = log_file.try_clone()?;
 
     // llama-server uses --rpc only for remote workers.
@@ -337,7 +424,7 @@ pub async fn start_llama_server(
         args.push("--tensor-split".to_string());
         args.push(ts.to_string());
     }
-    let local_device = detect_device();
+    let local_device = resolve_device_for_binary(&llama_server, None)?;
     if let Some(draft_path) = draft {
         if draft_path.exists() {
             if local_device != "CPU" {
@@ -461,8 +548,7 @@ fn detect_device() -> String {
     }
 
     // Linux: check for AMD ROCm/HIP
-    if command_has_output("rocm-smi", &["--showproductname"])
-        || command_has_output("rocminfo", &[])
+    if command_has_output("rocm-smi", &["--showproductname"]) || command_has_output("rocminfo", &[])
     {
         return "HIP0".to_string();
     }
