@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
 use mesh::NodeRole;
 use std::path::{Path, PathBuf};
 
-pub const VERSION: &str = "0.48.11";
+pub const VERSION: &str = "0.49.0";
 
 #[derive(Parser, Debug)]
 #[command(name = "mesh-llm", version = VERSION,
@@ -2180,9 +2180,13 @@ fn detect_bin_dir() -> Result<PathBuf> {
     if has_bundled_llama_bins(&dev) {
         return Ok(dev.canonicalize()?);
     }
-    let cargo = dir.join("../../../llama.cpp/build/bin");
+    let cargo = dir.join("../../llama.cpp/build/bin");
     if has_bundled_llama_bins(&cargo) {
         return Ok(cargo.canonicalize()?);
+    }
+    let cargo_alt = dir.join("../../../llama.cpp/build/bin");
+    if has_bundled_llama_bins(&cargo_alt) {
+        return Ok(cargo_alt.canonicalize()?);
     }
 
     Ok(dir.to_path_buf())
