@@ -16,6 +16,16 @@ fn temp_log_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
+fn log_tail(path: &Path, max_lines: usize) -> String {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+
+    let lines: Vec<&str> = contents.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
 fn command_has_output(command: &str, args: &[&str]) -> bool {
     let Ok(output) = std::process::Command::new(command).args(args).output() else {
         return false;
@@ -45,6 +55,12 @@ pub async fn start_rpc_server(
     let port = find_free_port().await?;
 
     let device = device.map(|s| s.to_string()).unwrap_or_else(detect_device);
+    let startup_timeout = if device.starts_with("Vulkan") {
+        std::time::Duration::from_secs(90)
+    } else {
+        std::time::Duration::from_secs(15)
+    };
+    let startup_polls = (startup_timeout.as_millis() / 500) as usize;
 
     tracing::info!("Starting rpc-server on :{port} (device: {device})");
 
@@ -76,7 +92,7 @@ pub async fn start_rpc_server(
         .with_context(|| format!("Failed to start rpc-server at {}", rpc_server.display()))?;
 
     // Wait for it to be listening
-    for _ in 0..30 {
+    for _ in 0..startup_polls {
         if is_port_open(port).await {
             // Detach — let it run in the background
             tokio::spawn(async move {
@@ -84,10 +100,35 @@ pub async fn start_rpc_server(
             });
             return Ok(port);
         }
+        if let Some(status) = child.try_wait().with_context(|| {
+            format!(
+                "Failed to poll rpc-server status for {}",
+                rpc_server.display()
+            )
+        })? {
+            let tail = log_tail(&rpc_log, 40);
+            let tail_msg = if tail.is_empty() {
+                format!("See {}", rpc_log.display())
+            } else {
+                format!("See {}:\n{}", rpc_log.display(), tail)
+            };
+            anyhow::bail!(
+                "rpc-server exited before listening on port {port} (device: {device}, status: {status}). {tail_msg}"
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    anyhow::bail!("rpc-server failed to start on port {port} within 15s");
+    let tail = log_tail(&rpc_log, 40);
+    let tail_msg = if tail.is_empty() {
+        format!("See {}", rpc_log.display())
+    } else {
+        format!("See {}:\n{}", rpc_log.display(), tail)
+    };
+    anyhow::bail!(
+        "rpc-server failed to start on port {port} within {}s (device: {device}). {tail_msg}",
+        startup_timeout.as_secs()
+    );
 }
 
 /// Kill orphan rpc-server processes from previous mesh-llm runs.
