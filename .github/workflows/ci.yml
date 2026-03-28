@@ -6,12 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Tiny model for integration tests (~138MB Q8_0, has chat template)
+  MODEL_URL: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+  MODEL_FILE: SmolLM2-135M-Instruct-Q8_0.gguf
+
 jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # ── UI ──
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -22,6 +28,7 @@ jobs:
         working-directory: mesh-llm/ui
         run: npm ci && npm run build
 
+      # ── Rust ──
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -29,17 +36,10 @@ jobs:
           workspaces: mesh-llm
 
       - name: Build mesh-llm
-        working-directory: mesh-llm
         run: cargo build --release
 
-      - name: Test mesh-llm
-        working-directory: mesh-llm
+      - name: Unit tests
         run: cargo test
-
-      - name: Smoke test CLI
-        run: |
-          target/release/mesh-llm --version
-          target/release/mesh-llm --help | head -5
 
       - name: Check formatting
         working-directory: mesh-llm
@@ -48,3 +48,257 @@ jobs:
       - name: Clippy
         working-directory: mesh-llm
         run: cargo clippy -- -D warnings || true
+
+      # ── llama.cpp (CPU-only for CI) ──
+      - name: Clone llama.cpp fork
+        run: git clone -b rebase-upstream-master --depth 1 https://github.com/michaelneale/llama.cpp.git llama.cpp
+
+      - name: Build llama.cpp (CPU + RPC)
+        run: |
+          cmake -B llama.cpp/build -S llama.cpp \
+            -DGGML_METAL=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_RPC=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_OPENSSL=OFF
+          cmake --build llama.cpp/build --config Release -j$(nproc)
+
+      # ── Download model ──
+      - name: Cache model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ~/.models/${{ env.MODEL_FILE }}
+          key: model-${{ env.MODEL_FILE }}
+
+      - name: Download model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.models
+          curl -fSL "$MODEL_URL" -o ~/.models/$MODEL_FILE
+          ls -lh ~/.models/$MODEL_FILE
+
+      # ── Integration smoke test ──
+      - name: Smoke test (real inference)
+        run: |
+          scripts/ci-smoke-test.sh \
+            target/release/mesh-llm \
+            llama.cpp/build/bin \
+            ~/.models/$MODEL_FILE
+
+      - name: CLI smoke test
+        run: |
+          target/release/mesh-llm --version
+          target/release/mesh-llm --help | head -5
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── UI ──
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        run: npm ci && npm run build
+
+      # ── Rust ──
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mesh-llm
+
+      - name: Build mesh-llm
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Check formatting
+        working-directory: mesh-llm
+        run: cargo fmt -- --check || true
+
+      - name: Clippy
+        working-directory: mesh-llm
+        run: cargo clippy -- -D warnings || true
+
+      # ── llama.cpp (Metal + RPC) ──
+      - name: Clone llama.cpp fork
+        run: git clone -b rebase-upstream-master --depth 1 https://github.com/michaelneale/llama.cpp.git llama.cpp
+
+      - name: Build llama.cpp (CPU + RPC)
+        run: |
+          cmake -B llama.cpp/build -S llama.cpp \
+            -DGGML_METAL=OFF \
+            -DGGML_RPC=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_OPENSSL=OFF
+          cmake --build llama.cpp/build --config Release -j$(sysctl -n hw.ncpu)
+
+      # ── Download model ──
+      - name: Cache model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ~/.models/${{ env.MODEL_FILE }}
+          key: model-${{ env.MODEL_FILE }}
+
+      - name: Download model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.models
+          curl -fSL "$MODEL_URL" -o ~/.models/$MODEL_FILE
+          ls -lh ~/.models/$MODEL_FILE
+
+      # ── Integration smoke test ──
+      - name: Smoke test (real inference)
+        run: |
+          scripts/ci-smoke-test.sh \
+            target/release/mesh-llm \
+            llama.cpp/build/bin \
+            ~/.models/$MODEL_FILE
+
+      - name: CLI smoke test
+        run: |
+          target/release/mesh-llm --version
+          target/release/mesh-llm --help | head -5
+
+  windows:
+    name: Windows ${{ matrix.name }}
+    runs-on: windows-2022
+    env:
+      ROCM_HIP_SDK_FILENAME: AMD-Software-PRO-Edition-25.Q3-WinSvr2022-For-HIP.exe
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: CPU
+            backend: cpu
+          - name: CUDA
+            backend: cuda
+          - name: ROCm
+            backend: rocm
+          - name: Vulkan
+            backend: vulkan
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@just
+
+      # ── UI ──
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        shell: pwsh
+        run: |
+          npm ci
+          npm run build
+
+      # ── Rust ──
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Install backend SDK
+        shell: pwsh
+        run: |
+          switch ('${{ matrix.backend }}') {
+            'cuda' {
+              choco install cuda -y --no-progress
+              $cudaRoot = $env:CUDA_PATH
+              if (-not $cudaRoot -or -not (Test-Path $cudaRoot)) {
+                $cudaRoot = Get-ChildItem "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA" -Directory -ErrorAction SilentlyContinue |
+                  Sort-Object Name -Descending |
+                  Select-Object -ExpandProperty FullName -First 1
+              }
+              if (-not $cudaRoot) {
+                throw 'CUDA toolkit install completed, but CUDA_PATH was not found.'
+              }
+              "$cudaRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              "CUDA_PATH=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+            'rocm' {
+              $downloadPage = "https://www.amd.com/en/developer/resources/rocm-hub/eula/licenses.html?filename=$env:ROCM_HIP_SDK_FILENAME"
+              $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+              $page = Invoke-WebRequest -Uri $downloadPage -WebSession $session
+              $formStart = [regex]::Match($page.Content, 'name=":formstart" value="([^"]+)"').Groups[1].Value
+              if (-not $formStart) {
+                throw 'Failed to extract AMD HIP SDK form metadata.'
+              }
+
+              $installer = Join-Path $env:RUNNER_TEMP $env:ROCM_HIP_SDK_FILENAME
+              $body = @{
+                ':formstart' = $formStart
+                '_charset_' = 'utf-8'
+                ':redirect' = '/en/developer/resources/rocm-hub/eula/licenses.html'
+                'filename' = $env:ROCM_HIP_SDK_FILENAME
+              }
+
+              Invoke-WebRequest `
+                -Uri 'https://www.amd.com/en/developer/resources/rocm-hub/eula/licenses.html' `
+                -WebSession $session `
+                -Method Post `
+                -Body $body `
+                -OutFile $installer `
+                -MaximumRedirection 5
+
+              $installLog = Join-Path $env:RUNNER_TEMP 'hip-sdk-install.log'
+              Start-Process $installer -ArgumentList '-install', '-log', $installLog -NoNewWindow -Wait
+
+              $rocmRoot = @(
+                (Join-Path $env:ProgramFiles 'AMD\ROCm'),
+                (Join-Path $env:ProgramFiles 'AMD\HIP')
+              ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+              if (-not $rocmRoot) {
+                throw "HIP SDK install completed, but ROCM_PATH was not found. See $installLog"
+              }
+
+              "$rocmRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              "$rocmRoot\llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              "ROCM_PATH=$rocmRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              "HIP_PATH=$rocmRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+            'vulkan' {
+              choco install vulkan-sdk -y --no-progress
+              $sdk = Get-ChildItem 'C:\VulkanSDK' -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                Select-Object -First 1
+              if (-not $sdk) {
+                throw 'Vulkan SDK install completed, but no C:\VulkanSDK directory was found.'
+              }
+              if ($sdk) {
+                "$($sdk.FullName)\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                "$($sdk.FullName)\Bin32" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              }
+            }
+            default {
+            }
+          }
+
+      - name: Build Windows backend
+        shell: pwsh
+        run: |
+          just build backend=${{ matrix.backend }}
+
+      - name: CLI smoke test
+        shell: pwsh
+        run: |
+          target\release\mesh-llm.exe --version
+          target\release\mesh-llm.exe --help | Select-Object -First 5
