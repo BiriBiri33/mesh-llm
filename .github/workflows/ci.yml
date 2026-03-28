@@ -6,12 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Tiny model for integration tests (~138MB Q8_0, has chat template)
+  MODEL_URL: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+  MODEL_FILE: SmolLM2-135M-Instruct-Q8_0.gguf
+
 jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # ── UI ──
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -22,6 +28,7 @@ jobs:
         working-directory: mesh-llm/ui
         run: npm ci && npm run build
 
+      # ── Rust ──
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -29,17 +36,10 @@ jobs:
           workspaces: mesh-llm
 
       - name: Build mesh-llm
-        working-directory: mesh-llm
         run: cargo build --release
 
-      - name: Test mesh-llm
-        working-directory: mesh-llm
+      - name: Unit tests
         run: cargo test
-
-      - name: Smoke test CLI
-        run: |
-          target/release/mesh-llm --version
-          target/release/mesh-llm --help | head -5
 
       - name: Check formatting
         working-directory: mesh-llm
@@ -48,3 +48,157 @@ jobs:
       - name: Clippy
         working-directory: mesh-llm
         run: cargo clippy -- -D warnings || true
+
+      # ── llama.cpp (CPU-only for CI) ──
+      - name: Clone llama.cpp fork
+        run: git clone -b rebase-upstream-master --depth 1 https://github.com/michaelneale/llama.cpp.git llama.cpp
+
+      - name: Build llama.cpp (CPU + RPC)
+        run: |
+          cmake -B llama.cpp/build -S llama.cpp \
+            -DGGML_METAL=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_RPC=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_OPENSSL=OFF
+          cmake --build llama.cpp/build --config Release -j$(nproc)
+
+      # ── Download model ──
+      - name: Cache model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ~/.models/${{ env.MODEL_FILE }}
+          key: model-${{ env.MODEL_FILE }}
+
+      - name: Download model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.models
+          curl -fSL "$MODEL_URL" -o ~/.models/$MODEL_FILE
+          ls -lh ~/.models/$MODEL_FILE
+
+      # ── Integration smoke test ──
+      - name: Smoke test (real inference)
+        run: |
+          scripts/ci-smoke-test.sh \
+            target/release/mesh-llm \
+            llama.cpp/build/bin \
+            ~/.models/$MODEL_FILE
+
+      - name: CLI smoke test
+        run: |
+          target/release/mesh-llm --version
+          target/release/mesh-llm --help | head -5
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── UI ──
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        run: npm ci && npm run build
+
+      # ── Rust ──
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mesh-llm
+
+      - name: Build mesh-llm
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Check formatting
+        working-directory: mesh-llm
+        run: cargo fmt -- --check || true
+
+      - name: Clippy
+        working-directory: mesh-llm
+        run: cargo clippy -- -D warnings || true
+
+      # ── llama.cpp (Metal + RPC) ──
+      - name: Clone llama.cpp fork
+        run: git clone -b rebase-upstream-master --depth 1 https://github.com/michaelneale/llama.cpp.git llama.cpp
+
+      - name: Build llama.cpp (Metal + RPC)
+        run: |
+          cmake -B llama.cpp/build -S llama.cpp \
+            -DGGML_METAL=ON \
+            -DGGML_RPC=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_OPENSSL=OFF
+          cmake --build llama.cpp/build --config Release -j$(sysctl -n hw.ncpu)
+
+      # ── Download model ──
+      - name: Cache model
+        id: cache-model
+        uses: actions/cache@v4
+        with:
+          path: ~/.models/${{ env.MODEL_FILE }}
+          key: model-${{ env.MODEL_FILE }}
+
+      - name: Download model
+        if: steps.cache-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.models
+          curl -fSL "$MODEL_URL" -o ~/.models/$MODEL_FILE
+          ls -lh ~/.models/$MODEL_FILE
+
+      # ── Integration smoke test ──
+      - name: Smoke test (real inference)
+        run: |
+          scripts/ci-smoke-test.sh \
+            target/release/mesh-llm \
+            llama.cpp/build/bin \
+            ~/.models/$MODEL_FILE
+
+      - name: CLI smoke test
+        run: |
+          target/release/mesh-llm --version
+          target/release/mesh-llm --help | head -5
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── UI ──
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mesh-llm/ui/package-lock.json
+
+      - name: Build UI
+        working-directory: mesh-llm/ui
+        run: npm ci && npm run build
+
+      # ── Rust ──
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mesh-llm
+
+      - name: Build mesh-llm
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: CLI smoke test
+        run: |
+          target/release/mesh-llm.exe --version
+          target/release/mesh-llm.exe --help
