@@ -267,7 +267,7 @@ benchmark-build-cuda:
     echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-cuda"
 
 [windows]
-benchmark-build-cuda:
+benchmark-build-cuda-windows:
     @powershell -NoProfile -ExecutionPolicy Bypass -Command "nvcc -O3 -o '{{mesh_dir}}/target/release/membench-fingerprint-cuda.exe' 'benchmarks/membench-fingerprint.cu'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; Write-Host 'Built: {{mesh_dir}}/target/release/membench-fingerprint-cuda.exe'"
 
 # Build AMD ROCm/HIP memory bandwidth benchmark (requires ROCm)
@@ -276,7 +276,7 @@ benchmark-build-hip:
     echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-hip"
 
 [windows]
-benchmark-build-hip:
+benchmark-build-hip-windows:
     @powershell -NoProfile -ExecutionPolicy Bypass -Command "hipcc -O3 -std=c++17 -o '{{mesh_dir}}/target/release/membench-fingerprint-hip.exe' 'benchmarks/membench-fingerprint.hip'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; Write-Host 'Built: {{mesh_dir}}/target/release/membench-fingerprint-hip.exe'"
 
 # Build Intel Arc SYCL memory bandwidth benchmark (requires Intel oneAPI) — UNVALIDATED
@@ -286,7 +286,7 @@ benchmark-build-intel:
     echo "Built: {{mesh_dir}}/target/release/membench-fingerprint-intel"
 
 [windows]
-benchmark-build-intel:
+benchmark-build-intel-windows:
     @echo "WARNING: Intel Arc benchmark is unvalidated — no Intel Arc hardware has been tested"
     @powershell -NoProfile -ExecutionPolicy Bypass -Command "icpx -O3 -fsycl -o '{{mesh_dir}}/target/release/membench-fingerprint-intel.exe' 'benchmarks/membench-fingerprint-intel.cpp'; if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }; Write-Host 'Built: {{mesh_dir}}/target/release/membench-fingerprint-intel.exe'"
 

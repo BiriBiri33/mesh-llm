@@ -154,7 +154,15 @@ just benchmark-build-hip      # AMD GPU — requires ROCm (hipcc)
 just benchmark-build-intel    # Intel Arc GPU — requires Intel oneAPI (icpx) — UNVALIDATED
 ```
 
-On Windows, the same `just benchmark-build-cuda`, `just benchmark-build-hip`, and `just benchmark-build-intel` recipes produce `.exe` binaries next to `mesh-llm.exe`.
+On Windows, use the dedicated recipes:
+
+```powershell
+just benchmark-build-cuda-windows
+just benchmark-build-hip-windows
+just benchmark-build-intel-windows
+```
+
+These produce `.exe` binaries next to `mesh-llm.exe`.
 
 > **AMD note:** The AMD benchmark (`benchmarks/membench-fingerprint.hip`) has not been tested on real AMD hardware. The recipe is provided for reference only.
 
