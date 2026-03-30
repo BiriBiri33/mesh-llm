@@ -107,6 +107,7 @@ const STREAM_PEER_LEAVING: u8 = 0x07;
 const STREAM_BLACKBOARD: u8 = 0x08;
 const STREAM_PLUGIN_CHANNEL: u8 = 0x09;
 const STREAM_PLUGIN_BULK_TRANSFER: u8 = 0x0a;
+pub const STREAM_TUNNEL_MLX_SHIM: u8 = 0x0b;
 
 /// Role a node plays in the mesh.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -216,7 +217,7 @@ pub struct PeerInfo {
 /// and excluded from gossip propagation. After 2x this duration they're removed entirely.
 const PEER_STALE_SECS: u64 = 180; // 3 minutes
 
-/// Directories to scan for GGUF models.
+/// Directories to scan for local model assets.
 pub fn model_dirs() -> Vec<std::path::PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let mut dirs = vec![home.join(".models")];
@@ -230,7 +231,15 @@ pub fn model_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// Scan model directories for GGUF files and return their stem names.
+fn is_mlx_model_dir(path: &std::path::Path) -> bool {
+    path.is_dir()
+        && path.join("config.json").exists()
+        && (path.join("tokenizer_config.json").exists() || path.join("tokenizer.json").exists())
+        && (path.join("model.safetensors").exists()
+            || path.join("model.safetensors.index.json").exists())
+}
+
+/// Scan model directories for local models and return their announced names.
 pub fn scan_local_models() -> Vec<String> {
     let mut names = Vec::new();
     for models_dir in model_dirs() {
@@ -248,6 +257,13 @@ pub fn scan_local_models() -> Vec<String> {
                             if !names.contains(&name) {
                                 names.push(name);
                             }
+                        }
+                    }
+                } else if is_mlx_model_dir(&path) {
+                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                        let name = name.to_string();
+                        if !names.contains(&name) {
+                            names.push(name);
                         }
                     }
                 }
@@ -276,7 +292,7 @@ fn split_gguf_base_name(stem: &str) -> Option<&str> {
     Some(&stem[..dash])
 }
 
-/// Find a GGUF model file by stem name, searching all model directories.
+/// Find a local model path by announced name, searching all model directories.
 /// Returns the first match found (prefers ~/.models/ over goose dir).
 /// For split GGUFs, finds the first part (name-00001-of-NNNNN.gguf).
 pub fn find_model_path(stem: &str) -> std::path::PathBuf {
@@ -285,6 +301,11 @@ pub fn find_model_path(stem: &str) -> std::path::PathBuf {
         // Try single-file first
         let candidate = dir.join(&filename);
         if candidate.exists() {
+            return candidate;
+        }
+        // Try MLX directory
+        let candidate = dir.join(stem);
+        if is_mlx_model_dir(&candidate) {
             return candidate;
         }
         // Try split GGUF: stem-00001-of-*.gguf
@@ -455,6 +476,8 @@ pub struct Node {
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     tunnel_http_tx:
         tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+    tunnel_mlx_tx:
+        tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream, u16)>,
     plugin_manager: Arc<Mutex<Option<crate::plugin::PluginManager>>>,
     pub blackboard: crate::blackboard::BlackboardStore,
     blackboard_name: Arc<Mutex<Option<String>>>,
@@ -482,6 +505,8 @@ struct MeshState {
 pub struct TunnelChannels {
     pub rpc: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     pub http: tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
+    pub mlx:
+        tokio::sync::mpsc::Receiver<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream, u16)>,
 }
 
 pub struct InflightRequestGuard {
@@ -601,6 +626,7 @@ impl Node {
         let (inflight_change_tx, _inflight_change_rx) = watch::channel(0u64);
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
+        let (tunnel_mlx_tx, tunnel_mlx_rx) = tokio::sync::mpsc::channel(256);
 
         let hw = crate::hardware::survey();
         let mut vram = hw.vram_bytes;
@@ -674,6 +700,7 @@ impl Node {
             inflight_change_tx,
             tunnel_tx,
             tunnel_http_tx,
+            tunnel_mlx_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
             blackboard: crate::blackboard::BlackboardStore::new(false),
             blackboard_name: Arc::new(Mutex::new(None)),
@@ -697,6 +724,7 @@ impl Node {
             TunnelChannels {
                 rpc: tunnel_rx,
                 http: tunnel_http_rx,
+                mlx: tunnel_mlx_rx,
             },
         ))
     }
@@ -720,10 +748,12 @@ impl Node {
         let (inflight_change_tx, _inflight_change_rx) = watch::channel(0u64);
         let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
         let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
+        let (tunnel_mlx_tx, tunnel_mlx_rx) = tokio::sync::mpsc::channel(256);
 
         let _channels = TunnelChannels {
             rpc: tunnel_rx,
             http: tunnel_http_rx,
+            mlx: tunnel_mlx_rx,
         };
 
         Ok(Node {
@@ -758,6 +788,7 @@ impl Node {
             inflight_change_tx,
             tunnel_tx,
             tunnel_http_tx,
+            tunnel_mlx_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
             blackboard: crate::blackboard::BlackboardStore::new(false),
             blackboard_name: Arc::new(Mutex::new(None)),
@@ -2133,6 +2164,27 @@ impl Node {
         result
     }
 
+    /// Open an MLX shim tunnel bi-stream to a peer and declare the remote loopback port.
+    pub async fn open_mlx_shim_tunnel(
+        &self,
+        peer_id: EndpointId,
+        target_port: u16,
+    ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+        let conn = {
+            self.state
+                .lock()
+                .await
+                .connections
+                .get(&peer_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("No connection to {}", peer_id.fmt_short()))?
+        };
+        let (mut send, recv) = conn.open_bi().await?;
+        send.write_all(&[STREAM_TUNNEL_MLX_SHIM]).await?;
+        send.write_all(&target_port.to_le_bytes()).await?;
+        Ok((send, recv))
+    }
+
     pub async fn set_tunnel_port(&self, id: EndpointId, port: u16) {
         if let Some(peer) = self.state.lock().await.peers.get_mut(&id) {
             peer.tunnel_port = Some(port);
@@ -2398,6 +2450,23 @@ impl Node {
                 STREAM_TUNNEL_HTTP => {
                     if self.tunnel_http_tx.send((send, recv)).await.is_err() {
                         tracing::warn!("HTTP tunnel receiver dropped");
+                        break;
+                    }
+                }
+                STREAM_TUNNEL_MLX_SHIM => {
+                    let mut port_buf = [0u8; 2];
+                    if recv.read_exact(&mut port_buf).await.is_err() {
+                        tracing::warn!("MLX shim stream missing target port");
+                        continue;
+                    }
+                    let target_port = u16::from_le_bytes(port_buf);
+                    if self
+                        .tunnel_mlx_tx
+                        .send((send, recv, target_port))
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("MLX shim tunnel receiver dropped");
                         break;
                     }
                 }
@@ -3134,6 +3203,28 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{unique}"))
+    }
+
+    #[test]
+    fn test_is_mlx_model_dir_detects_layout() {
+        let dir = temp_dir("mesh-llm-mlx-layout");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("model.safetensors.index.json"), b"{}").unwrap();
+
+        assert!(is_mlx_model_dir(&dir));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn test_merge_demand_takes_max() {

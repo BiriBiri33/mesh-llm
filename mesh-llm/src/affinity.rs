@@ -274,6 +274,7 @@ struct RoutingKeys {
     sticky_hash: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
 pub struct TargetSelection {
     pub target: election::InferenceTarget,
     pub learn_prefix_hash: Option<u64>,
