@@ -22,34 +22,7 @@ build backend="" cuda_arch="" rocm_arch="":
 
 # Build on macOS Apple Silicon (Metal + RPC)
 build-mac:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -d "{{ llama_dir }}" ]; then
-        echo "Cloning michaelneale/llama.cpp (rebase-upstream-master branch)..."
-        git clone -b rebase-upstream-master https://github.com/michaelneale/llama.cpp.git "{{ llama_dir }}"
-    else
-        cd "{{ llama_dir }}"
-        current_branch=$(git branch --show-current)
-        if [ "$current_branch" != "rebase-upstream-master" ]; then
-            echo "⚠️  llama.cpp is on branch '$current_branch', switching to rebase-upstream-master..."
-            git checkout rebase-upstream-master
-        fi
-        echo "Pulling latest rebase-upstream-master from origin..."
-        git pull --ff-only origin rebase-upstream-master
-        cd ..
-    fi
-    cmake -B "{{ build_dir }}" -S "{{ llama_dir }}" -DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF
-    cmake --build "{{ build_dir }}" --config Release -j$(sysctl -n hw.ncpu)
-    echo "Build complete: {{ build_dir }}/bin/"
-    if [ -d "{{ mesh_dir }}" ]; then
-        echo "Building mesh-llm..."
-        if [ -d "{{ ui_dir }}" ]; then
-            echo "Building mesh-llm UI..."
-            (cd "{{ ui_dir }}" && npm ci && npm run build)
-        fi
-        cargo build --release
-        echo "Mesh binary: target/release/mesh-llm"
-    fi
+    @scripts/build-mac.sh
 
 # Build on Linux with CUDA, ROCm, or Vulkan — delegates to scripts/build-linux.sh
 build-linux backend="" cuda_arch="" rocm_arch="":
