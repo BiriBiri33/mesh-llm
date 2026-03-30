@@ -10,7 +10,7 @@
 //! The dashboard is read-only — shows status, topology, models.
 //! All mutations happen via CLI flags (--join, --model, --auto).
 
-use crate::{download, election, mesh, nostr, plugin};
+use crate::{affinity, download, election, mesh, nostr, plugin};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
 use std::sync::Arc;
@@ -32,6 +32,7 @@ pub struct MeshApi {
 struct ApiInner {
     node: mesh::Node,
     plugin_manager: plugin::PluginManager,
+    affinity_router: affinity::AffinityRouter,
     is_host: bool,
     is_client: bool,
     llama_ready: bool,
@@ -107,6 +108,7 @@ struct StatusPayload {
     my_hostname: Option<String>,
     my_is_soc: Option<bool>,
     gpus: Vec<GpuEntry>,
+    routing_affinity: affinity::AffinityStatsSnapshot,
 }
 
 #[derive(Serialize)]
@@ -146,11 +148,13 @@ impl MeshApi {
         api_port: u16,
         model_size_bytes: u64,
         plugin_manager: plugin::PluginManager,
+        affinity_router: affinity::AffinityRouter,
     ) -> Self {
         MeshApi {
             inner: Arc::new(Mutex::new(ApiInner {
                 node,
                 plugin_manager,
+                affinity_router,
                 is_host: false,
                 is_client: false,
                 llama_ready: false,
@@ -214,6 +218,7 @@ impl MeshApi {
             token,
             my_vram_gb,
             inflight_requests,
+            routing_affinity,
             model_name,
             model_size_bytes,
             llama_ready,
@@ -232,6 +237,7 @@ impl MeshApi {
                 inner.node.invite_token(),
                 inner.node.vram_bytes() as f64 / 1e9,
                 inner.node.inflight_requests(),
+                inner.affinity_router.stats_snapshot(),
                 inner.model_name.clone(),
                 inner.model_size_bytes,
                 inner.llama_ready,
@@ -403,6 +409,7 @@ impl MeshApi {
             my_hostname: node.hostname.clone(),
             my_is_soc: node.is_soc,
             gpus: build_gpus(node.gpu_name.as_deref(), node.gpu_vram.as_deref()),
+            routing_affinity,
         }
     }
 

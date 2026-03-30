@@ -1,3 +1,4 @@
+mod affinity;
 mod api;
 mod autoupdate;
 mod download;
@@ -1284,6 +1285,8 @@ async fn run_auto(
         }
     }
 
+    let affinity_router = affinity::AffinityRouter::new();
+
     // Start bootstrap proxy if joining an existing mesh.
     // This gives instant API access via tunnel while our GPU loads.
     let mut bootstrap_listener_tx = if !cli.join.is_empty() {
@@ -1291,8 +1294,9 @@ async fn run_auto(
             tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<tokio::net::TcpListener>>(1);
         let boot_node = node.clone();
         let boot_port = api_port;
+        let boot_affinity = affinity_router.clone();
         tokio::spawn(async move {
-            bootstrap_proxy(boot_node, boot_port, stop_rx, cli.listen_all).await;
+            bootstrap_proxy(boot_node, boot_port, stop_rx, cli.listen_all, boot_affinity).await;
         });
         Some(stop_tx)
     } else {
@@ -1452,6 +1456,7 @@ async fn run_auto(
     // API proxy: model-aware routing
     let proxy_node = node.clone();
     let proxy_rx = target_rx.clone();
+    let proxy_affinity = affinity_router.clone();
     tokio::spawn(async move {
         api_proxy(
             proxy_node,
@@ -1460,6 +1465,7 @@ async fn run_auto(
             drop_tx,
             existing_listener,
             cli.listen_all,
+            proxy_affinity,
         )
         .await;
     });
@@ -1474,6 +1480,7 @@ async fn run_auto(
             api_port,
             model_size_bytes,
             plugin_manager.clone(),
+            affinity_router.clone(),
         );
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         cs.set_nostr_discovery(cli.nostr_discovery).await;
@@ -1735,7 +1742,14 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     node.set_plugin_manager(plugin_manager.clone()).await;
     node.start_plugin_channel_forwarder(plugin_mesh_rx);
 
-    let cs = api::MeshApi::new(node.clone(), "(idle)".into(), cli.port, 0, plugin_manager);
+    let cs = api::MeshApi::new(
+        node.clone(),
+        "(idle)".into(),
+        cli.port,
+        0,
+        plugin_manager,
+        affinity::AffinityRouter::new(),
+    );
     cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
     cs.update(false, false).await;
     let cs2 = cs.clone();
@@ -1761,6 +1775,7 @@ async fn run_passive(
     plugin_manager: plugin::PluginManager,
 ) -> Result<Option<String>> {
     let local_port = cli.port;
+    let affinity_router = affinity::AffinityRouter::new();
     node.set_blackboard_name(blackboard_display_name(cli, &node))
         .await;
 
@@ -1824,7 +1839,14 @@ async fn run_passive(
         } else {
             "(standby)".to_string()
         };
-        let cs = api::MeshApi::new(node.clone(), label, local_port, 0, plugin_manager);
+        let cs = api::MeshApi::new(
+            node.clone(),
+            label,
+            local_port,
+            0,
+            plugin_manager,
+            affinity_router.clone(),
+        );
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         cs.set_nostr_discovery(cli.nostr_discovery).await;
         if is_client {
@@ -1888,7 +1910,8 @@ async fn run_passive(
                 tcp_stream.set_nodelay(true)?;
                 tracing::info!("Connection from {addr}");
                 let node = node.clone();
-                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
+                let affinity = affinity_router.clone();
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true, affinity));
             }
             Some(model_name) = promote_rx.recv() => {
                 eprintln!("⬆️  Standby promoting to serve: {model_name}");
@@ -1913,6 +1936,7 @@ async fn api_proxy(
     drop_tx: tokio::sync::mpsc::UnboundedSender<String>,
     existing_listener: Option<tokio::net::TcpListener>,
     listen_all: bool,
+    affinity: affinity::AffinityRouter,
 ) {
     let listener = match existing_listener {
         Some(l) => l,
@@ -1937,6 +1961,7 @@ async fn api_proxy(
 
         let targets = target_rx.borrow().clone();
         let node = node.clone();
+        let affinity = affinity.clone();
 
         let drop_tx = drop_tx.clone();
         tokio::spawn(async move {
@@ -1944,6 +1969,7 @@ async fn api_proxy(
             let mut buf = vec![0u8; 32768];
             match proxy::peek_request(&tcp_stream, &mut buf).await {
                 Ok((n, model_name)) => {
+                    let body_json = proxy::extract_body_json(&buf[..n]);
                     if proxy::is_models_list_request(&buf[..n]) {
                         let models: Vec<String> = targets.targets.keys().cloned().collect();
                         let _ = proxy::send_models_list(tcp_stream, &models).await;
@@ -1967,7 +1993,7 @@ async fn api_proxy(
                     // Smart routing: if no model specified (or model="auto"), classify and pick
                     let (effective_model, classification) =
                         if model_name.is_none() || model_name.as_deref() == Some("auto") {
-                            if let Some(body_json) = proxy::extract_body_json(&buf[..n]) {
+                            if let Some(body_json) = body_json.as_ref() {
                                 let cl = router::classify(&body_json);
                                 let available: Vec<(&str, f64)> = targets
                                     .targets
@@ -2062,18 +2088,38 @@ async fn api_proxy(
                             .get_moe_target(&session_hint)
                             .unwrap_or(first_available_target(&targets))
                     } else if let Some(ref name) = effective_model {
-                        let t = targets.get(name);
+                        let selection = affinity::select_model_target_for_request(
+                            &targets,
+                            name,
+                            body_json.as_ref(),
+                            &affinity,
+                        );
+                        let t = selection.target.clone();
                         if matches!(t, election::InferenceTarget::None) {
                             tracing::debug!("Model '{}' not found, trying first available", name);
                             first_available_target(&targets)
                         } else {
-                            t
+                            let routed =
+                                proxy::route_to_target(node.clone(), tcp_stream, t.clone()).await;
+                            if routed {
+                                if let Some(prefix_hash) = selection.learn_prefix_hash {
+                                    affinity.learn_target(name, prefix_hash, &t);
+                                }
+                            } else if let (Some(prefix_hash), Some(cached_target)) = (
+                                selection.learn_prefix_hash,
+                                selection.cached_target.as_ref(),
+                            ) {
+                                if cached_target == &t {
+                                    affinity.forget_target(name, prefix_hash, &t);
+                                }
+                            }
+                            return;
                         }
                     } else {
                         first_available_target(&targets)
                     };
 
-                    proxy::route_to_target(node, tcp_stream, target).await;
+                    let _ = proxy::route_to_target(node, tcp_stream, target).await;
                 }
                 Err(_) => return,
             };
@@ -2088,6 +2134,7 @@ async fn bootstrap_proxy(
     port: u16,
     mut stop_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<tokio::net::TcpListener>>,
     listen_all: bool,
+    affinity: affinity::AffinityRouter,
 ) {
     let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
     let listener = match tokio::net::TcpListener::bind(format!("{addr}:{port}")).await {
@@ -2109,7 +2156,8 @@ async fn bootstrap_proxy(
                 };
                 let _ = tcp_stream.set_nodelay(true);
                 let node = node.clone();
-                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true));
+                let affinity = affinity.clone();
+                tokio::spawn(proxy::handle_mesh_request(node, tcp_stream, true, affinity));
             }
             resp_tx = stop_rx.recv() => {
                 // Hand over listener to api_proxy
