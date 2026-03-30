@@ -416,6 +416,10 @@ mesh-llm --model ~/my-models/custom-model.gguf
 
 Catalog models are downloaded with resume support — if a download is interrupted, it picks up where it left off. Use `mesh-llm download` to browse the catalog.
 
+## Community
+
+Join the [#mesh-llm channel on the Goose Discord](https://discord.gg/goose-oss) for discussion, support, and development chat.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build and development workflows.
