@@ -2481,7 +2481,7 @@ function DashboardPage({
                       <TableCell>{peer.statusLabel}</TableCell>
                       <TableCell className="max-w-[180px] truncate">{peer.modelLabel}</TableCell>
                       <TableCell className="text-right">{peer.latencyLabel}</TableCell>
-                      <TableCell className="text-right">{peer.displayVramGb.toFixed(1)} GB</TableCell>
+                      <TableCell className="text-right">{peer.role === 'Client' ? 'n/a' : `${peer.displayVramGb.toFixed(1)} GB`}</TableCell>
                       <TableCell className="text-right whitespace-nowrap">{peer.shareLabel}</TableCell>
                     </TableRow>
                   ))}
