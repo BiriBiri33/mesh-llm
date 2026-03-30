@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
@@ -36,6 +39,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -53,6 +58,10 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   build_linux_cuda:
     name: Build Linux CUDA
@@ -88,6 +97,8 @@ jobs:
 
       - uses: taiki-e/install-action@just
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -105,6 +116,10 @@ jobs:
           name: release-linux-cuda
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   build_linux_amd:
     name: Build Linux AMD ROCm
@@ -140,6 +155,8 @@ jobs:
 
       - uses: taiki-e/install-action@just
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -157,6 +174,10 @@ jobs:
           name: release-linux-rocm
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   build_linux_vulkan:
     name: Build Linux Vulkan
@@ -192,6 +213,8 @@ jobs:
 
       - uses: taiki-e/install-action@just
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -209,6 +232,10 @@ jobs:
           name: release-linux-vulkan
           path: dist/*
           if-no-files-found: error
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   publish:
     name: Publish GitHub release
