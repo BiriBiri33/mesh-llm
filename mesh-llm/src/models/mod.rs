@@ -8,7 +8,7 @@ pub mod topology;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::api::sync::{Api, ApiBuilder};
 use hf_hub::api::RepoInfo;
-use hf_hub::cache_manager::HFCacheInfo;
+use hf_hub::cache::CacheInfo;
 use hf_hub::{Repo, RepoType};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1297,8 +1297,8 @@ fn clear_progress_line() -> Result<()> {
 fn cached_repos() -> Result<Vec<CachedRepo>> {
     let cache = huggingface_hub_cache();
     let mut repos = Vec::new();
-    let cache_info = HFCacheInfo::scan_cache_dir(Some(cache.path()))
-        .context("Enumerate cached Hugging Face repos")?;
+    let cache_info =
+        CacheInfo::scan_dir(Some(cache.path())).context("Enumerate cached Hugging Face repos")?;
     for repo in &cache_info.repos {
         let cache_id = repo.cache_id();
         let Some(repo_id) = cache_id.strip_prefix("model/") else {
@@ -1338,8 +1338,8 @@ fn cached_repo_for_path(path: &Path) -> Result<Option<CachedRepo>> {
         return Ok(None);
     };
     let cache = huggingface_hub_cache();
-    let cache_info = HFCacheInfo::scan_cache_dir(Some(cache.path()))
-        .context("Enumerate cached Hugging Face repos")?;
+    let cache_info =
+        CacheInfo::scan_dir(Some(cache.path())).context("Enumerate cached Hugging Face repos")?;
     let ref_name = cache_info
         .repos
         .iter()
@@ -1444,8 +1444,8 @@ fn is_not_found_error(message: &str) -> bool {
 
 fn cached_repo_files(repo: &CachedRepo) -> Result<Vec<String>> {
     let cache = huggingface_hub_cache();
-    let cache_info = HFCacheInfo::scan_cache_dir(Some(cache.path()))
-        .context("Enumerate cached Hugging Face repos")?;
+    let cache_info =
+        CacheInfo::scan_dir(Some(cache.path())).context("Enumerate cached Hugging Face repos")?;
     let files = cache_info
         .repos
         .iter()

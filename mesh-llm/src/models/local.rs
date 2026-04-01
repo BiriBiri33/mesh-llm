@@ -1,4 +1,4 @@
-use hf_hub::cache_manager::HFCacheInfo;
+use hf_hub::cache::CacheInfo;
 use hf_hub::Cache;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -81,7 +81,7 @@ pub fn legacy_models_present() -> bool {
 
 pub fn huggingface_identity_for_path(path: &Path) -> Option<HuggingFaceModelIdentity> {
     let cache = huggingface_hub_cache();
-    let cache_info = HFCacheInfo::scan_cache_dir(Some(cache.path())).ok()?;
+    let cache_info = CacheInfo::scan_dir(Some(cache.path())).ok()?;
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     for repo in &cache_info.repos {
@@ -158,6 +158,23 @@ pub fn path_is_in_legacy_models_dir(path: &Path) -> bool {
     path.starts_with(legacy_models_dir())
 }
 
+fn cache_scanned_file_path(
+    cache_root: &Path,
+    repo: &hf_hub::cache::CachedRepo,
+    revision: &hf_hub::cache::CachedRevision,
+    file: &hf_hub::cache::CachedFile,
+) -> PathBuf {
+    let relative = file
+        .file_path
+        .strip_prefix(&revision.snapshot_path)
+        .unwrap_or(file.file_path.as_path());
+    cache_root
+        .join(repo.repo.folder_name())
+        .join("snapshots")
+        .join(&revision.commit_hash)
+        .join(relative)
+}
+
 fn push_model_name(
     path: &Path,
     names: &mut Vec<String>,
@@ -210,7 +227,8 @@ fn tree_contains_gguf(root: &Path) -> bool {
 
 fn scan_hf_cache_models(names: &mut Vec<String>, seen: &mut HashSet<String>, min_size_bytes: u64) {
     let cache = huggingface_hub_cache();
-    let Ok(cache_info) = HFCacheInfo::scan_cache_dir(Some(cache.path())) else {
+    let cache_root = cache.path().clone();
+    let Ok(cache_info) = CacheInfo::scan_dir(Some(cache.path())) else {
         return;
     };
     for repo in &cache_info.repos {
@@ -222,7 +240,8 @@ fn scan_hf_cache_models(names: &mut Vec<String>, seen: &mut HashSet<String>, min
                 if !file.file_name.ends_with(".gguf") {
                     continue;
                 }
-                push_model_name(&file.file_path, names, seen, min_size_bytes);
+                let path = cache_scanned_file_path(&cache_root, repo, revision, file);
+                push_model_name(&path, names, seen, min_size_bytes);
             }
         }
     }
@@ -287,7 +306,8 @@ fn find_hf_cache_model_path(root: &Path, stem: &str) -> Option<PathBuf> {
 
     let split_prefix = format!("{stem}-00001-of-");
     let cache = huggingface_hub_cache();
-    let Ok(cache_info) = HFCacheInfo::scan_cache_dir(Some(cache.path())) else {
+    let cache_root = cache.path().clone();
+    let Ok(cache_info) = CacheInfo::scan_dir(Some(cache.path())) else {
         return None;
     };
     for repo in &cache_info.repos {
@@ -304,7 +324,7 @@ fn find_hf_cache_model_path(root: &Path, stem: &str) -> Option<PathBuf> {
                 };
                 if name == filename || (name.starts_with(&split_prefix) && name.ends_with(".gguf"))
                 {
-                    return Some(file.file_path.clone());
+                    return Some(cache_scanned_file_path(&cache_root, repo, revision, file));
                 }
             }
         }

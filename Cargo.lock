@@ -1483,7 +1483,7 @@ dependencies = [
 [[package]]
 name = "hf-hub"
 version = "0.5.0"
-source = "git+https://github.com/i386/hf-hub.git?rev=cf9d4061a0e32c3f634b02724be863656e63b314#cf9d4061a0e32c3f634b02724be863656e63b314"
+source = "git+https://github.com/i386/hf-hub.git?rev=71088fdca79cf9967e247794b5b6d2c0aecc894c#71088fdca79cf9967e247794b5b6d2c0aecc894c"
 dependencies = [
  "dirs",
  "http",
