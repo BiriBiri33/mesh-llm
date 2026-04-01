@@ -2,11 +2,12 @@ mod affinity;
 mod api;
 mod autoupdate;
 mod benchmark;
-mod download;
+mod cli;
 mod election;
 mod hardware;
 mod launch;
 mod mesh;
+mod models;
 mod moe;
 mod nostr;
 mod pipeline;
@@ -30,275 +31,14 @@ pub use plugins::blackboard;
 pub use plugins::blackboard::mcp as blackboard_mcp;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser};
+use cli::models::dispatch_models_command;
+use cli::{Cli, Command, PluginCommand};
 use mesh::NodeRole;
+use models::catalog;
 use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = "0.53.1";
-
-#[derive(Parser, Debug)]
-#[command(name = "mesh-llm", version = VERSION,
-    about = "Pool GPUs over the internet for LLM inference",
-    after_help = "Run with --help-advanced for all options.")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-
-    /// Show all options (including advanced/niche ones).
-    #[arg(long, hide = true)]
-    help_advanced: bool,
-
-    /// Join a mesh via invite token (can repeat).
-    #[arg(long, short)]
-    join: Vec<String>,
-
-    /// Discover a mesh via Nostr and join it.
-    #[arg(long, default_missing_value = "", num_args = 0..=1)]
-    discover: Option<String>,
-
-    /// Auto-join the best mesh found via Nostr.
-    #[arg(long)]
-    auto: bool,
-
-    /// Model to serve (path, catalog name, or HuggingFace URL).
-    #[arg(long)]
-    model: Vec<PathBuf>,
-
-    /// API port (default: 9337).
-    #[arg(long, default_value = "9337")]
-    port: u16,
-
-    /// Run as a client — no GPU, no model needed.
-    #[arg(long)]
-    client: bool,
-
-    /// Web console port (default: 3131).
-    #[arg(long, default_value = "3131")]
-    console: u16,
-
-    /// Publish this mesh for discovery by others.
-    #[arg(long)]
-    publish: bool,
-
-    /// Name for this mesh (shown in discovery).
-    #[arg(long)]
-    mesh_name: Option<String>,
-
-    /// Region tag, e.g. "US", "EU", "AU" (shown in discovery).
-    #[arg(long)]
-    region: Option<String>,
-
-    /// Enable blackboard on public meshes (on by default for private meshes).
-    #[arg(long)]
-    blackboard: bool,
-
-    /// Your display name on the blackboard.
-    #[arg(long)]
-    name: Option<String>,
-
-    /// Internal plugin service mode.
-    #[arg(long, hide = true)]
-    plugin: Option<String>,
-
-    /// Disable startup self-update for this process.
-    #[arg(long, hide = true)]
-    no_self_update: bool,
-
-    // ── Advanced options (hidden from default --help) ─────────────
-    /// Draft model for speculative decoding.
-    #[arg(long, hide = true)]
-    draft: Option<PathBuf>,
-
-    /// Max draft tokens (default: 8).
-    #[arg(long, default_value = "8", hide = true)]
-    draft_max: u16,
-
-    /// Disable automatic draft model detection.
-    #[arg(long, hide = true)]
-    no_draft: bool,
-
-    /// Force tensor split even if the model fits on one node.
-    #[arg(long, hide = true)]
-    split: bool,
-
-    /// Override context size (tokens). Default: auto-scaled to available VRAM.
-    #[arg(long, hide = true)]
-    ctx_size: Option<u32>,
-
-    /// Limit VRAM advertised to the mesh (GB).
-    #[arg(long, hide = true)]
-    max_vram: Option<f64>,
-
-    /// Enumerate host hardware (GPU name, hostname) at startup.
-    #[arg(long, hide = true)]
-    enumerate_host: bool,
-
-    /// Path to rpc-server, llama-server, and llama-moe-split binaries.
-    #[arg(long, hide = true)]
-    bin_dir: Option<PathBuf>,
-
-    /// Override which bundled llama.cpp flavor to use.
-    #[arg(long, value_enum)]
-    llama_flavor: Option<launch::BinaryFlavor>,
-
-    /// Device for rpc-server (e.g. MTL0, CUDA0, HIP0, Vulkan0, CPU).
-    #[arg(long, hide = true)]
-    device: Option<String>,
-
-    /// Tensor split ratios for llama-server (e.g. "0.8,0.2").
-    #[arg(long, hide = true)]
-    tensor_split: Option<String>,
-
-    /// Override iroh relay URLs.
-    #[arg(long, hide = true)]
-    relay: Vec<String>,
-
-    /// Bind QUIC to a fixed UDP port (for NAT port forwarding).
-    #[arg(long, hide = true)]
-    bind_port: Option<u16>,
-
-    /// Bind to 0.0.0.0 (for containers/Fly.io).
-    #[arg(long, hide = true)]
-    listen_all: bool,
-
-    /// Stop advertising when N clients connected.
-    #[arg(long, hide = true)]
-    max_clients: Option<usize>,
-
-    /// Custom Nostr relay URLs.
-    #[arg(long, hide = true)]
-    nostr_relay: Vec<String>,
-
-    /// Ignored (backward compat).
-    #[arg(long, hide = true)]
-    no_console: bool,
-
-    /// Optional path to the mesh-llm config file.
-    #[arg(long, hide = true)]
-    config: Option<PathBuf>,
-
-    /// Internal: set when this node joined via Nostr discovery (not --join).
-    #[arg(skip)]
-    nostr_discovery: bool,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Download a model from the catalog
-    Download {
-        /// Model name (e.g. "Qwen2.5-32B-Instruct-Q4_K_M" or just "32b")
-        name: Option<String>,
-        /// Also download the recommended draft model for speculative decoding
-        #[arg(long)]
-        draft: bool,
-    },
-    /// Drop a model from the mesh.
-    #[command(hide = true)]
-    Drop {
-        /// Model name to drop
-        name: String,
-        /// API port of the running mesh-llm instance (default: 9337)
-        #[arg(long, default_value = "9337")]
-        port: u16,
-    },
-    /// Discover meshes on Nostr and optionally auto-join one.
-    Discover {
-        /// Filter by model name (substring match)
-        #[arg(long)]
-        model: Option<String>,
-        /// Filter by minimum VRAM (GB)
-        #[arg(long)]
-        min_vram: Option<f64>,
-        /// Filter by region
-        #[arg(long)]
-        region: Option<String>,
-        /// Print the invite token of the best match (for piping to --join)
-        #[arg(long)]
-        auto: bool,
-        /// Nostr relay URLs (default: see DEFAULT_RELAYS)
-        #[arg(long)]
-        relay: Vec<String>,
-    },
-    /// Rotate all identity keys (node + Nostr).
-    #[command(hide = true)]
-    RotateKey,
-    /// Launch Goose with mesh-llm as the inference provider.
-    ///
-    /// If no mesh is running on --port, this auto-joins the mesh as a client.
-    #[command(name = "goose")]
-    Goose {
-        /// Model id to use from /v1/models (default: auto = mesh picks best)
-        #[arg(long)]
-        model: Option<String>,
-        /// API port for mesh-llm (default: 9337)
-        #[arg(long, default_value = "9337")]
-        port: u16,
-    },
-    /// Launch Claude Code with mesh-llm as the inference provider.
-    ///
-    /// If no mesh is running on --port, this auto-joins the mesh as a client.
-    #[command(name = "claude")]
-    Claude {
-        /// Model id to use from /v1/models (default: auto = mesh picks best)
-        #[arg(long)]
-        model: Option<String>,
-        /// API port for mesh-llm (default: 9337)
-        #[arg(long, default_value = "9337")]
-        port: u16,
-    },
-    /// Stop all running mesh-llm, llama-server, and rpc-server processes.
-    Stop,
-    /// Blackboard — post, search, and read messages shared across the mesh.
-    ///
-    /// Post a message:   mesh-llm blackboard "your message here"
-    /// Show feed:        mesh-llm blackboard
-    /// Search:           mesh-llm blackboard --search "query"
-    /// From a peer:      mesh-llm blackboard --from tyler
-    /// MCP server:       mesh-llm --client --join <token> blackboard --mcp
-    /// Install skill:    mesh-llm blackboard install-skill
-    ///
-    /// Conventions: prefix messages with QUESTION:, STATUS:, FINDING:, TIP: etc.
-    /// Search picks these up naturally via multi-term OR matching.
-    #[command(name = "blackboard")]
-    Blackboard {
-        /// Message to post (if provided).
-        text: Option<String>,
-        /// Search the blackboard.
-        #[arg(long)]
-        search: Option<String>,
-        /// Filter by author name.
-        #[arg(long)]
-        from: Option<String>,
-        /// Only show items from the last N hours (default: 24).
-        #[arg(long)]
-        since: Option<f64>,
-        /// Max items to show (default: 20).
-        #[arg(long, default_value = "20")]
-        limit: usize,
-        /// Console/API port of the running mesh-llm instance.
-        #[arg(long, default_value = "3131")]
-        port: u16,
-        /// Run as an MCP server over stdio (for agent integration).
-        #[arg(long)]
-        mcp: bool,
-    },
-    /// Plugin management.
-    Plugin {
-        #[command(subcommand)]
-        command: PluginCommand,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum PluginCommand {
-    /// Compatibility shim for the old install workflow.
-    Install {
-        /// Plugin name.
-        name: String,
-    },
-    /// List auto-registered and configured plugins.
-    List,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -315,7 +55,6 @@ async fn main() -> Result<()> {
 
     // --help-advanced: print full help with all hidden options and commands visible
     if std::env::args().any(|a| a == "--help-advanced") {
-        use clap::CommandFactory;
         let mut cmd = Cli::command();
         // Unhide all arguments
         let args: Vec<clap::Id> = cmd.get_arguments().map(|a| a.get_id().clone()).collect();
@@ -361,28 +100,32 @@ async fn main() -> Result<()> {
     // Subcommand dispatch
     if let Some(cmd) = &cli.command {
         match cmd {
+            Command::Models { command } => {
+                dispatch_models_command(command).await?;
+                return Ok(());
+            }
             Command::Download { name, draft } => {
                 match name {
                     Some(query) => {
-                        let model = download::find_model(query)
+                        let model = catalog::find_model(query)
                             .ok_or_else(|| anyhow::anyhow!("No model matching '{}' in catalog. Run `mesh-llm download` to list.", query))?;
-                        download::download_model(model).await?;
+                        catalog::download_model(model).await?;
                         if *draft {
-                            if let Some(draft_name) = model.draft {
+                            if let Some(draft_name) = model.draft.as_deref() {
                                 let draft_model =
-                                    download::find_model(draft_name).ok_or_else(|| {
+                                    catalog::find_model(draft_name).ok_or_else(|| {
                                         anyhow::anyhow!(
                                             "Draft model '{}' not found in catalog",
                                             draft_name
                                         )
                                     })?;
-                                download::download_model(draft_model).await?;
+                                catalog::download_model(draft_model).await?;
                             } else {
                                 eprintln!("⚠ No draft model available for {}", model.name);
                             }
                         }
                     }
-                    None => download::list_models(),
+                    None => catalog::list_models(),
                 }
                 return Ok(());
             }
@@ -610,11 +353,16 @@ async fn main() -> Result<()> {
     }
 
     // --- Validation ---
-    if cli.client && !cli.model.is_empty() {
+    if cli.client && (!cli.model.is_empty() || !cli.gguf.is_empty()) {
         anyhow::bail!("--client and --model are mutually exclusive");
     }
     // No args at all = idle mode with console for browsing/joining
-    if cli.model.is_empty() && cli.join.is_empty() && !cli.client && !cli.auto {
+    if cli.model.is_empty()
+        && cli.gguf.is_empty()
+        && cli.join.is_empty()
+        && !cli.client
+        && !cli.auto
+    {
         {
             let bin_dir = match &cli.bin_dir {
                 Some(d) => d.clone(),
@@ -627,10 +375,19 @@ async fn main() -> Result<()> {
     // --- Resolve models from CLI ---
     // All --model entries get resolved/downloaded. First is primary (gets rpc/tunnel).
     // Additional models run as solo llama-servers (must fit in VRAM independently).
+    // --gguf entries are explicit raw-file escapes and must already exist on disk.
     let mut resolved_models: Vec<PathBuf> = Vec::new();
+    for path in &cli.gguf {
+        if !path.exists() {
+            anyhow::bail!("GGUF file not found: {}", path.display());
+        }
+        resolved_models.push(path.clone());
+    }
     for m in &cli.model {
         resolved_models.push(resolve_model(m).await?);
     }
+    models::warn_about_legacy_model_usage(&resolved_models);
+    models::warn_about_updates_for_paths(&resolved_models);
 
     // Build requested model names from all resolved models
     // Strip split GGUF suffix so "MiniMax-M2.5-Q4_K_M-00001-of-00004" → "MiniMax-M2.5-Q4_K_M"
@@ -660,20 +417,25 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
         return Ok(input.to_path_buf());
     }
 
-    // Check all model directories (including goose) for just a filename
+    // Check managed model directories for just a filename
     if !s.contains('/') {
-        for dir in mesh::model_dirs() {
+        for dir in models::model_dirs() {
             let candidate = dir.join(input);
             if candidate.exists() {
                 return Ok(candidate);
             }
         }
+        let installed_name = s.strip_suffix(".gguf").unwrap_or(&s);
+        let installed_path = models::find_model_path(installed_name);
+        if installed_path.exists() {
+            return Ok(installed_path);
+        }
         // Try catalog match
-        if let Some(entry) = download::find_model(&s) {
-            return download::download_model(entry).await;
+        if let Some(entry) = catalog::find_model(&s) {
+            return catalog::download_model(entry).await;
         }
         anyhow::bail!(
-            "Model not found: {}\nNot a local file, not in ~/.models/ or goose models, not in catalog.\n\
+            "Model not found: {}\nNot a local file, not in the Hugging Face cache or legacy ~/.models, not in catalog.\n\
              Use a path, a catalog name (run `mesh-llm download` to list), or a HuggingFace URL.",
             s
         );
@@ -685,26 +447,29 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
             .rsplit('/')
             .next()
             .ok_or_else(|| anyhow::anyhow!("Can't extract filename from URL: {}", s))?;
-        return download::download_hf_split_gguf(&s, filename).await;
+        return catalog::download_hf_split_gguf(&s, filename).await;
     }
 
     // HF shorthand: org/repo/file.gguf
     if s.contains('/') && s.ends_with(".gguf") {
-        let url = if s.contains("/resolve/") {
-            format!("https://huggingface.co/{}", s)
-        } else {
-            let parts: Vec<&str> = s.splitn(3, '/').collect();
-            if parts.len() == 3 {
-                format!(
-                    "https://huggingface.co/{}/{}/resolve/main/{}",
-                    parts[0], parts[1], parts[2]
-                )
-            } else {
-                anyhow::bail!("Can't parse HF shorthand: {}. Use org/repo/file.gguf", s);
-            }
+        if s.contains("/resolve/") {
+            let filename = s.rsplit('/').next().unwrap();
+            return catalog::download_hf_split_gguf(&s, filename).await;
+        }
+        let parts: Vec<&str> = s.splitn(3, '/').collect();
+        if parts.len() != 3 {
+            anyhow::bail!("Can't parse HF shorthand: {}. Use org/repo/file.gguf", s);
+        }
+        let (repo_tail, revision) = match parts[1].split_once('@') {
+            Some((repo, revision)) => (repo, Some(revision)),
+            None => (parts[1], None),
         };
-        let filename = s.rsplit('/').next().unwrap();
-        return download::download_hf_split_gguf(&url, filename).await;
+        return catalog::download_hf_repo_file(
+            &format!("{}/{}", parts[0], repo_tail),
+            revision,
+            parts[2],
+        )
+        .await;
     }
 
     anyhow::bail!("Model not found: {}", s);
@@ -714,18 +479,16 @@ async fn resolve_model(input: &std::path::Path) -> Result<PathBuf> {
 /// If not on disk, downloads it (drafts are <1GB).
 pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
     let filename = model.file_name()?.to_str()?;
-    let catalog_entry = download::MODEL_CATALOG
-        .iter()
-        .find(|m| m.file == filename)?;
-    let draft_name = catalog_entry.draft?;
-    let draft_entry = download::MODEL_CATALOG
+    let catalog_entry = catalog::MODEL_CATALOG.iter().find(|m| m.file == filename)?;
+    let draft_name = catalog_entry.draft.as_deref()?;
+    let draft_entry = catalog::MODEL_CATALOG
         .iter()
         .find(|m| m.name == draft_name)?;
     let draft_stem = draft_entry
         .file
         .strip_suffix(".gguf")
-        .unwrap_or(draft_entry.file);
-    let draft_path = mesh::find_model_path(draft_stem);
+        .unwrap_or(&draft_entry.file);
+    let draft_path = models::find_model_path(draft_stem);
     if draft_path.exists() {
         return Some(draft_path);
     }
@@ -734,10 +497,10 @@ pub async fn ensure_draft(model: &std::path::Path) -> Option<PathBuf> {
         "📥 Downloading draft model {} ({})...",
         draft_entry.name, draft_entry.size
     );
-    match download::download_model(draft_entry).await {
-        Ok(_path) => {
+    match catalog::download_model(draft_entry).await {
+        Ok(path) => {
             eprintln!("✅ Draft model ready: {}", draft_entry.name);
-            Some(draft_path)
+            Some(path)
         }
         Err(e) => {
             eprintln!(
@@ -807,7 +570,7 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
 
     /// Check if a model fits in our VRAM. Returns false and logs if it doesn't.
     fn model_fits(model: &str, my_vram: u64) -> bool {
-        let model_path = mesh::find_model_path(model);
+        let model_path = models::find_model_path(model);
         let model_bytes = std::fs::metadata(&model_path)
             .map(|md| md.len())
             .unwrap_or(0);
@@ -895,8 +658,8 @@ async fn pick_model_assignment(node: &mesh::Node, local_models: &[String]) -> Op
         if serving_count.get(m).copied().unwrap_or(0) > 0 {
             continue;
         }
-        if let Some(cat) = download::find_model(m) {
-            let size_bytes = parse_size_str(cat.size);
+        if let Some(cat) = catalog::find_model(m) {
+            let size_bytes = parse_size_str(&cat.size);
             let needed = (size_bytes as f64 * 1.1) as u64;
             if needed <= my_vram {
                 downloadable.push((m.clone(), d.request_count));
@@ -985,7 +748,7 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
     let mut unserved: Vec<(String, u64)> = Vec::new();
     for (m, d) in &demand {
         if serving_count.get(m).copied().unwrap_or(0) == 0 && local_models.contains(m) {
-            let model_path = mesh::find_model_path(m);
+            let model_path = models::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path)
                 .map(|md| md.len())
                 .unwrap_or(0);
@@ -1011,7 +774,7 @@ async fn check_unserved_model(node: &mesh::Node, local_models: &[String]) -> Opt
         }
         let servers = serving_count.get(m).copied().unwrap_or(0) as f64;
         if servers > 0.0 && d.request_count > 0 && local_models.contains(m) {
-            let model_path = mesh::find_model_path(m);
+            let model_path = models::find_model_path(m);
             let model_bytes = std::fs::metadata(&model_path)
                 .map(|md| md.len())
                 .unwrap_or(0);
@@ -1166,7 +929,7 @@ async fn run_auto(
     let local_models = if is_client {
         vec![]
     } else {
-        mesh::scan_local_models()
+        models::scan_local_models()
     };
     tracing::info!("Local models on disk: {:?}", local_models);
 
@@ -1396,23 +1159,15 @@ async fn run_auto(
         };
         if let Some(model_name) = assignment {
             eprintln!("Mesh assigned model: {model_name}");
-            let model_path = mesh::find_model_path(&model_name);
+            let model_path = models::find_model_path(&model_name);
             if model_path.exists() {
                 model_path
-            } else if let Some(cat) = download::find_model(&model_name) {
+            } else if let Some(cat) = catalog::find_model(&model_name) {
                 // Model not on disk but in catalog — download it
                 eprintln!("📥 Downloading {} for mesh...", model_name);
-                let dest = download::models_dir().join(cat.file);
-                download::download_model(cat).await?;
-                dest
+                catalog::download_model(cat).await?
             } else {
-                // Not on disk and not in catalog — try common paths
-                let alt = download::models_dir().join(&model_name);
-                if alt.exists() {
-                    alt
-                } else {
-                    model_path
-                }
+                model_path
             }
         } else {
             // Nothing on disk matches — go passive, act as proxy
@@ -1434,16 +1189,11 @@ async fn run_auto(
             match run_passive(&cli, node.clone(), is_client, plugin_manager.clone()).await? {
                 Some(model_name) => {
                     // Promoted! Resolve the model path and continue to serving
-                    let model_path = mesh::find_model_path(&model_name);
+                    let model_path = models::find_model_path(&model_name);
                     if model_path.exists() {
                         model_path
                     } else {
-                        let alt = download::models_dir().join(&model_name);
-                        if alt.exists() {
-                            alt
-                        } else {
-                            model_path
-                        }
+                        model_path
                     }
                 }
                 None => return Ok(()), // clean shutdown
@@ -1767,7 +1517,7 @@ async fn run_auto(
 async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     let resolved_plugins = load_resolved_plugins(&cli)?;
     let my_vram_gb = mesh::detect_vram_bytes_capped(cli.max_vram) as f64 / 1e9;
-    let local_models = mesh::scan_local_models();
+    let local_models = models::scan_local_models();
     eprintln!(
         "mesh-llm v{VERSION} — {:.0}GB VRAM, {} models on disk",
         my_vram_gb,
@@ -1785,6 +1535,10 @@ async fn run_idle(cli: Cli, _bin_dir: PathBuf) -> Result<()> {
     eprintln!("    mesh-llm --join <token>      join by invite token");
     eprintln!("    mesh-llm --client --auto     join as API-only client");
     eprintln!();
+    if models::legacy_models_present() {
+        models::print_legacy_storage_warning();
+        eprintln!();
+    }
 
     // Start a dormant node just for the console
     let (node, _channels) = mesh::Node::start(
@@ -1933,7 +1687,7 @@ async fn run_passive(
     if !is_client {
         let watch_node = node.clone();
         let mut peer_rx = node.peer_change_rx.clone();
-        let local_models = mesh::scan_local_models();
+        let local_models = models::scan_local_models();
         tokio::spawn(async move {
             // Wait for initial mesh settle
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -3127,9 +2881,12 @@ fn build_serving_list(resolved_models: &[PathBuf], model_name: &str) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hf_hub::{Cache, Repo, RepoType};
     use serde_json::json;
+    use serial_test::serial;
     use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3257,6 +3014,107 @@ mod tests {
             raw.truncate(header_end);
             return raw;
         }
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resolve_model_accepts_short_catalog_name_from_hf_cache() {
+        let prev_hub_cache = std::env::var_os("HF_HUB_CACHE");
+        let prev_hf_home = std::env::var_os("HF_HOME");
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+
+        let cache_root = std::env::temp_dir().join(format!(
+            "mesh-llm-short-name-cache-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::env::set_var("HF_HUB_CACHE", &cache_root);
+        std::env::remove_var("HF_HOME");
+        std::env::remove_var("XDG_CACHE_HOME");
+
+        let cache = Cache::new(cache_root.clone());
+        let repo = Repo::with_revision(
+            "bartowski/Llama-3.2-1B-Instruct-GGUF".to_string(),
+            RepoType::Model,
+            "main".to_string(),
+        );
+        let cache_repo = cache.repo(repo);
+        cache_repo.create_ref("test-commit").unwrap();
+        let model_path = cache_repo
+            .pointer_path("test-commit")
+            .join("Llama-3.2-1B-Instruct-Q4_K_M.gguf");
+        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+        std::fs::write(&model_path, b"gguf").unwrap();
+
+        let resolved = resolve_model(Path::new("Llama-3.2-1B-Instruct-Q4_K_M"))
+            .await
+            .unwrap();
+        assert_eq!(resolved, model_path);
+
+        let _ = std::fs::remove_dir_all(&cache_root);
+        restore_env("HF_HUB_CACHE", prev_hub_cache);
+        restore_env("HF_HOME", prev_hf_home);
+        restore_env("XDG_CACHE_HOME", prev_xdg);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resolve_model_accepts_non_catalog_name_from_hf_cache() {
+        let prev_hub_cache = std::env::var_os("HF_HUB_CACHE");
+        let prev_hf_home = std::env::var_os("HF_HOME");
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+
+        let cache_root = std::env::temp_dir().join(format!(
+            "mesh-llm-non-catalog-cache-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::env::set_var("HF_HUB_CACHE", &cache_root);
+        std::env::remove_var("HF_HOME");
+        std::env::remove_var("XDG_CACHE_HOME");
+
+        let cache = Cache::new(cache_root.clone());
+        let repo = Repo::with_revision(
+            "someone/Custom-GGUF".to_string(),
+            RepoType::Model,
+            "main".to_string(),
+        );
+        let cache_repo = cache.repo(repo);
+        cache_repo.create_ref("test-commit").unwrap();
+        let model_path = cache_repo
+            .pointer_path("test-commit")
+            .join("Custom-Model-Q4_K_M.gguf");
+        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+        std::fs::write(&model_path, b"gguf").unwrap();
+
+        let resolved_by_stem = resolve_model(Path::new("Custom-Model-Q4_K_M"))
+            .await
+            .unwrap();
+        assert_eq!(resolved_by_stem, model_path);
+
+        let resolved_by_filename = resolve_model(Path::new("Custom-Model-Q4_K_M.gguf"))
+            .await
+            .unwrap();
+        assert_eq!(resolved_by_filename, model_path);
+
+        let _ = std::fs::remove_dir_all(&cache_root);
+        restore_env("HF_HUB_CACHE", prev_hub_cache);
+        restore_env("HF_HOME", prev_hf_home);
+        restore_env("XDG_CACHE_HOME", prev_xdg);
     }
 
     fn find_header_end(buf: &[u8]) -> Option<usize> {

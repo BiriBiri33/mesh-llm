@@ -10,7 +10,7 @@
 //! The dashboard is read-only — shows status, topology, models.
 //! All mutations happen via CLI flags (--join, --model, --auto).
 
-use crate::{affinity, download, election, mesh, nostr, plugin, proxy};
+use crate::{affinity, election, mesh, nostr, plugin, proxy};
 use include_dir::{include_dir, Dir};
 use serde::Serialize;
 use std::sync::Arc;
@@ -134,11 +134,20 @@ struct PeerPayload {
 #[derive(Serialize)]
 struct MeshModelPayload {
     name: String,
+    display_name: String,
     status: String,
     node_count: usize,
     size_gb: f64,
     /// Whether this model supports vision/image input
     vision: bool,
+    /// Display-oriented vision metadata status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vision_status: Option<&'static str>,
+    /// Whether this model appears reasoning-oriented.
+    reasoning: bool,
+    /// Display-oriented reasoning metadata status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_status: Option<&'static str>,
     /// Total requests seen across the mesh (from demand map)
     #[serde(skip_serializing_if = "Option::is_none")]
     request_count: Option<u64>,
@@ -294,6 +303,7 @@ impl MeshApi {
             .iter()
             .map(|name| {
                 let is_warm = served.contains(name);
+                let display_name = crate::models::installed_model_display_name(name);
                 let node_count = if is_warm {
                     let peer_count = all_peers
                         .iter()
@@ -315,14 +325,14 @@ impl MeshApi {
                 let size_gb = if *name == model_name && model_size_bytes > 0 {
                     model_size_bytes as f64 / 1e9
                 } else {
-                    download::parse_size_gb(
-                        download::MODEL_CATALOG
+                    crate::models::catalog::parse_size_gb(
+                        crate::models::catalog::MODEL_CATALOG
                             .iter()
                             .find(|m| {
-                                m.file.strip_suffix(".gguf").unwrap_or(m.file) == name.as_str()
+                                m.file.strip_suffix(".gguf").unwrap_or(&m.file) == name.as_str()
                                     || m.name == name.as_str()
                             })
-                            .map(|m| m.size)
+                            .map(|m| m.size.as_str())
                             .unwrap_or("0"),
                     )
                 };
@@ -333,16 +343,25 @@ impl MeshApi {
                     ),
                     None => (None, None),
                 };
-                let vision = download::MODEL_CATALOG
-                    .iter()
-                    .find(|m| {
-                        m.name == name.as_str()
-                            || m.file.strip_suffix(".gguf").unwrap_or(m.file) == name.as_str()
-                    })
-                    .map(|m| m.mmproj.is_some())
-                    .unwrap_or(false);
+                let capabilities = crate::models::installed_model_capabilities(name);
+                let vision = capabilities.supports_vision_runtime();
+                let vision_status = if vision || capabilities.vision_label().is_some() {
+                    Some(capabilities.vision_status())
+                } else {
+                    None
+                };
+                let reasoning = matches!(
+                    capabilities.reasoning,
+                    crate::models::capabilities::CapabilityLevel::Supported
+                );
+                let reasoning_status = if reasoning || capabilities.reasoning_label().is_some() {
+                    Some(capabilities.reasoning_status())
+                } else {
+                    None
+                };
                 MeshModelPayload {
                     name: name.clone(),
+                    display_name,
                     status: if is_warm {
                         "warm".into()
                     } else {
@@ -351,6 +370,9 @@ impl MeshApi {
                     node_count,
                     size_gb,
                     vision,
+                    vision_status,
+                    reasoning,
+                    reasoning_status,
                     request_count,
                     last_active_secs_ago,
                 }

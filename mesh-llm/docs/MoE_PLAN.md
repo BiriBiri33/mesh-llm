@@ -14,13 +14,13 @@ All core phases are complete and integrated into mesh-llm.
 
 ### Ranking
 - **Catalog models**: pre-computed expert gate mass rankings baked into `download.rs` (e.g. `QWEN3_30B_A3B_RANKING`).
-- **Cached rankings**: `moe::load_cached_ranking()` loads from `~/.models/moe-rankings/<model>.csv`.
+- **Cached rankings**: `moe::load_cached_ranking()` loads from a sibling `moe-rankings/` directory next to the source model file.
 - **Fallback**: no ranking → conservative 50% shared core with sequential expert IDs.
 - **Tool**: `llama-moe-analyze` (in `llama.cpp/tools/moe-analyze/`) runs inference on sample prompts and exports per-expert gate mass CSV.
 
 ### Splitting (`moe.rs` + `llama-moe-split`)
 - `compute_assignments()` implements the overlap strategy: shared core (top N experts by gate mass) replicated to every node, remaining experts distributed uniquely.
-- `run_split()` calls `llama-moe-split` to produce per-node GGUFs (trunk + expert subset). Cached at `~/.models/moe-splits/<model>/<n>-nodes/node-<i>.gguf`.
+- `run_split()` calls `llama-moe-split` to produce per-node GGUFs (trunk + expert subset). Cached at `~/.cache/mesh-llm/splits/<model>/<n>-nodes/node-<i>.gguf`.
 - `llama-moe-split` (in `llama.cpp/tools/moe-split/`) slices expert tensors, gathers router gate rows, clamps `expert_used_count`. Supports `--groups`, `--expert-list`, `--ranking-file`.
 
 ### Mesh Integration (`election.rs`)

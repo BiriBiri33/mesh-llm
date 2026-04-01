@@ -584,23 +584,24 @@ pub async fn send_models_list(mut stream: TcpStream, models: &[String]) -> std::
     let data: Vec<serde_json::Value> = models
         .iter()
         .map(|m| {
-            let has_vision = crate::download::MODEL_CATALOG
-                .iter()
-                .find(|c| {
-                    c.name == m.as_str()
-                        || c.file.strip_suffix(".gguf").unwrap_or(c.file) == m.as_str()
-                })
-                .map(|c| c.mmproj.is_some())
-                .unwrap_or(false);
+            let capabilities = crate::models::installed_model_capabilities(m);
+            let has_vision = capabilities.supports_vision_runtime();
             let mut caps = vec!["text"];
             if has_vision {
                 caps.push("vision");
             }
+            if capabilities.reasoning_label().is_some() {
+                caps.push("reasoning");
+            }
+            let display_name = crate::models::installed_model_display_name(m);
             serde_json::json!({
                 "id": m,
+                "display_name": display_name,
                 "object": "model",
                 "owned_by": "mesh-llm",
                 "capabilities": caps,
+                "vision_status": capabilities.vision_status(),
+                "reasoning_status": capabilities.reasoning_status(),
             })
         })
         .collect();

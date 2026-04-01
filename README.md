@@ -395,7 +395,7 @@ Draft pairings for speculative decoding:
 
 ## Specifying models
 
-`--model` accepts several formats. Models are auto-downloaded to `~/.models/` on first use.
+`--model` accepts several formats. Hugging Face-backed models are cached in the standard Hugging Face cache (`~/.cache/huggingface/hub/` by default) on first use.
 
 ```bash
 # Catalog name (fuzzy match — finds Qwen3-8B-Q4_K_M)
@@ -410,11 +410,34 @@ mesh-llm --model https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/res
 # HuggingFace shorthand (org/repo/file.gguf)
 mesh-llm --model bartowski/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
-# Local file path
-mesh-llm --model ~/my-models/custom-model.gguf
+# Local file path (legacy/raw file mode)
+mesh-llm --gguf ~/my-models/custom-model.gguf
 ```
 
-Catalog models are downloaded with resume support — if a download is interrupted, it picks up where it left off. Use `mesh-llm download` to browse the catalog.
+Catalog models are downloaded with resume support. Use the `models` subcommands to browse, inspect, and fetch exact refs.
+
+### Model storage and migration
+
+- Hugging Face repo snapshots are the canonical managed model store.
+- `~/.models/` is deprecated and will be removed in a future release.
+- Arbitrary local GGUF files remain supported through `--gguf`.
+- MoE split artifacts are cached separately under `~/.cache/mesh-llm/splits/`.
+
+Useful commands:
+
+```bash
+mesh-llm models recommended      # list built-in recommended models
+mesh-llm models installed        # list installed local models
+mesh-llm models search qwen 8b   # search Hugging Face GGUF repos
+mesh-llm models search --catalog qwen
+mesh-llm models show Qwen/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf
+mesh-llm models download Qwen/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf
+mesh-llm models migrate          # inspect deprecated ~/.models content
+mesh-llm models migrate --apply  # materialize recognized HF-backed models into the HF cache
+mesh-llm models updates --check  # check cached HF repos for newer upstream revisions
+mesh-llm models updates --all    # refresh all cached HF repos
+mesh-llm models updates Qwen/Qwen3-8B-GGUF
+```
 
 ## Community
 

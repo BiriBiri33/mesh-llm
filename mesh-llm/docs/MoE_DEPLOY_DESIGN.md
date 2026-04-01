@@ -46,7 +46,7 @@ else:
 
 `run_split()` calls the external `llama-moe-split` tool with `--expert-list`. Produces a self-contained GGUF: full trunk + selected experts + adjusted router gates + updated metadata.
 
-Splits are cached at `~/.models/moe-splits/<model>/<n>-nodes/node-<i>.gguf`. Invalidated implicitly when node count changes (different directory).
+Splits are cached at `~/.cache/mesh-llm/splits/<model>/<n>-nodes/node-<i>.gguf`. Invalidated implicitly when node count changes (different directory).
 
 ### Step 5: Independent llama-servers
 

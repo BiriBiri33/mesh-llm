@@ -353,8 +353,26 @@ pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
 
 // ── Ranking cache ──
 
+fn mesh_cache_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("XDG_CACHE_HOME") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("mesh-llm");
+        }
+    }
+
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache")
+        .join("mesh-llm")
+}
+
+fn split_cache_root() -> PathBuf {
+    mesh_cache_dir().join("splits")
+}
+
 /// Path to cached ranking CSV for a model.
-/// Stored next to the model: `~/.models/moe-rankings/<model-stem>.csv`
+/// Stored in a sibling `moe-rankings/` directory next to the source model file.
 pub fn ranking_cache_path(model_path: &Path) -> PathBuf {
     let stem = model_path.file_stem().unwrap_or_default().to_string_lossy();
     let dir = model_path.parent().unwrap_or(Path::new("."));
@@ -491,11 +509,76 @@ pub fn expert_list_arg(assignment: &NodeAssignment) -> String {
 /// Path to the cached split GGUF for a given model + node count + node index.
 pub fn split_path(model_path: &Path, n_nodes: usize, node_index: usize) -> PathBuf {
     let stem = model_path.file_stem().unwrap_or_default().to_string_lossy();
+    let new_path = split_cache_root()
+        .join(format!("{stem}"))
+        .join(format!("{n_nodes}-nodes"))
+        .join(format!("node-{node_index}.gguf"));
+    migrate_legacy_split_if_present(model_path, n_nodes, node_index, &new_path);
+    new_path
+}
+
+fn legacy_split_path(model_path: &Path, n_nodes: usize, node_index: usize) -> PathBuf {
+    let stem = model_path.file_stem().unwrap_or_default().to_string_lossy();
     let dir = model_path.parent().unwrap_or(Path::new("."));
     dir.join("moe-splits")
         .join(format!("{stem}"))
         .join(format!("{n_nodes}-nodes"))
         .join(format!("node-{node_index}.gguf"))
+}
+
+fn migrate_legacy_split_if_present(
+    model_path: &Path,
+    n_nodes: usize,
+    node_index: usize,
+    new_path: &Path,
+) {
+    if new_path.exists() {
+        return;
+    }
+
+    let legacy_path = legacy_split_path(model_path, n_nodes, node_index);
+    if !legacy_path.exists() {
+        return;
+    }
+
+    if let Some(parent) = new_path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+
+    if std::fs::rename(&legacy_path, new_path).is_ok() {
+        cleanup_empty_legacy_split_dirs(&legacy_path);
+        return;
+    }
+
+    if std::fs::copy(&legacy_path, new_path).is_ok() {
+        let _ = std::fs::remove_file(&legacy_path);
+        cleanup_empty_legacy_split_dirs(&legacy_path);
+    }
+}
+
+fn cleanup_empty_legacy_split_dirs(legacy_path: &Path) {
+    let Some(node_dir) = legacy_path.parent() else {
+        return;
+    };
+    let Some(model_dir) = node_dir.parent() else {
+        return;
+    };
+    let Some(root_dir) = model_dir.parent() else {
+        return;
+    };
+
+    for dir in [node_dir, model_dir, root_dir] {
+        let Ok(mut entries) = std::fs::read_dir(dir) else {
+            break;
+        };
+        if entries.next().is_none() {
+            let _ = std::fs::remove_dir(dir);
+        } else {
+            break;
+        }
+    }
 }
 
 fn resolve_split_binary(bin_dir: &Path) -> anyhow::Result<PathBuf> {
@@ -550,6 +633,7 @@ pub fn run_split(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_assignments_2_nodes() {
@@ -642,6 +726,67 @@ mod tests {
         assert_eq!(loaded, vec![0, 26, 41]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial]
+    fn split_path_uses_mesh_cache_root() {
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("XDG_CACHE_HOME", "/tmp/mesh-llm-cache-root");
+
+        let model = Path::new("/tmp/models/Qwen3-30B-A3B-Q4_K_M.gguf");
+        let path = split_path(model, 3, 1);
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/mesh-llm-cache-root")
+                .join("mesh-llm")
+                .join("splits")
+                .join("Qwen3-30B-A3B-Q4_K_M")
+                .join("3-nodes")
+                .join("node-1.gguf")
+        );
+
+        restore_env("XDG_CACHE_HOME", prev_xdg);
+    }
+
+    #[test]
+    #[serial]
+    fn split_path_migrates_legacy_split_if_present() {
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+        let base =
+            std::env::temp_dir().join(format!("mesh-llm-moe-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cache_root = base.join("cache");
+        let model_root = base.join("models");
+        let model_path = model_root.join("demo.gguf");
+        let legacy = model_root
+            .join("moe-splits")
+            .join("demo")
+            .join("2-nodes")
+            .join("node-0.gguf");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&model_root).unwrap();
+        std::fs::write(&model_path, b"model").unwrap();
+        std::fs::write(&legacy, b"legacy-split").unwrap();
+        std::env::set_var("XDG_CACHE_HOME", &cache_root);
+
+        let new_path = split_path(&model_path, 2, 0);
+
+        assert!(new_path.exists());
+        assert_eq!(std::fs::read(&new_path).unwrap(), b"legacy-split");
+        assert!(!legacy.exists());
+
+        restore_env("XDG_CACHE_HOME", prev_xdg);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
     }
 
     #[test]

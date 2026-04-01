@@ -32,7 +32,7 @@ just build
 Then run the benchmark:
 
 ```bash
-MODEL_PATH=$HOME/.models/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
+MODEL_PATH=/path/to/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
 REQUESTS=8 \
 ENTRY_MODE=passive \
 NO_DRAFT=1 \

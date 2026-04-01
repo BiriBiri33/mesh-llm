@@ -6,7 +6,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::{download, launch, plugin, Cli, VERSION};
+use crate::{cli::Cli, launch, plugin, VERSION};
 
 const DEFAULT_RELEASE_REPO: &str = "michaelneale/mesh-llm";
 #[cfg(not(windows))]
@@ -355,7 +355,8 @@ async fn install_latest_bundle(
         .with_context(|| format!("Failed to create update workspace {}", workspace.display()))?;
 
     let result = async {
-        download::download_url(&latest_release_asset_url(asset_name), &archive).await?;
+        crate::models::catalog::download_url(&latest_release_asset_url(asset_name), &archive)
+            .await?;
         extract_bundle_archive(&archive, &extracted)?;
         let staged_files = collect_bundle_files(&extracted, expected_flavor)?;
         finish_bundle_install(
