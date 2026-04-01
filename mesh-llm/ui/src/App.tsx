@@ -4942,22 +4942,6 @@ function formatLatency(value?: number | null) {
   return `${ms} ms`;
 }
 
-function fitBadgeClass(label?: string) {
-  if (label === 'Likely comfortable') {
-    return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300';
-  }
-  if (label === 'Likely fits') {
-    return 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300';
-  }
-  if (label === 'Possible with tradeoffs') {
-    return 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300';
-  }
-  if (label === 'Likely too large') {
-    return 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300';
-  }
-  return 'border-border bg-muted text-foreground';
-}
-
 function headerFitLabel(label?: string) {
   if (label === 'Likely comfortable' || label === 'Likely fits') {
     return 'Suitable for this node';
