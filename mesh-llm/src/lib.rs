@@ -7,16 +7,13 @@ mod hardware;
 mod inference;
 mod mesh;
 mod models;
-mod nostr;
+mod network;
 mod plugin;
 mod plugin_mcp;
 mod plugins;
 mod protocol;
-mod proxy;
 mod rewrite;
-mod router;
 pub(crate) mod runtime;
-mod tunnel;
 
 pub mod proto {
     pub mod node {
@@ -26,6 +23,7 @@ pub mod proto {
 
 pub(crate) use autoupdate::{latest_release_version, version_newer};
 pub(crate) use inference::{election, launch, moe, pipeline};
+pub(crate) use network::{nostr, proxy, router, tunnel};
 pub use plugins::blackboard;
 pub use plugins::blackboard::mcp as blackboard_mcp;
 
