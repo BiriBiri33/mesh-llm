@@ -445,44 +445,51 @@ impl MeshApi {
     }
 
     async fn local_inventory_snapshot(&self) -> crate::models::LocalModelInventorySnapshot {
-        let maybe_wait = {
+        // Always await a oneshot for the result; if no scan is running, start one in
+        // a detached task that will perform the scan and notify all waiters.
+        let rx = {
             let mut inner = self.inner.lock().await;
             if inner.inventory_scan_running {
+                // A scan is already in progress; just register as another waiter.
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 inner.inventory_scan_waiters.push(tx);
-                Some(rx)
+                rx
             } else {
+                // No scan running: mark as running, register ourselves as a waiter,
+                // and kick off a detached task to perform the scan and cleanup.
                 inner.inventory_scan_running = true;
-                None
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                inner.inventory_scan_waiters.push(tx);
+
+                let inner_arc = self.inner.clone();
+                tokio::spawn(async move {
+                    let snapshot = match tokio::task::spawn_blocking(|| {
+                        crate::models::scan_local_inventory_snapshot_with_progress(|_| {})
+                    })
+                    .await
+                    {
+                        Ok(snapshot) => snapshot,
+                        Err(e) => {
+                            tracing::warn!("Local inventory scan failed: {e}");
+                            crate::models::LocalModelInventorySnapshot::default()
+                        }
+                    };
+
+                    let waiters = {
+                        let mut inner = inner_arc.lock().await;
+                        inner.inventory_scan_running = false;
+                        std::mem::take(&mut inner.inventory_scan_waiters)
+                    };
+                    for tx in waiters {
+                        let _ = tx.send(snapshot.clone());
+                    }
+                });
+
+                rx
             }
         };
 
-        if let Some(rx) = maybe_wait {
-            return rx.await.unwrap_or_default();
-        }
-
-        let snapshot = match tokio::task::spawn_blocking(|| {
-            crate::models::scan_local_inventory_snapshot_with_progress(|_| {})
-        })
-        .await
-        {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                tracing::warn!("Local inventory scan failed: {e}");
-                crate::models::LocalModelInventorySnapshot::default()
-            }
-        };
-
-        let waiters = {
-            let mut inner = self.inner.lock().await;
-            inner.inventory_scan_running = false;
-            std::mem::take(&mut inner.inventory_scan_waiters)
-        };
-        for tx in waiters {
-            let _ = tx.send(snapshot.clone());
-        }
-
-        snapshot
+        rx.await.unwrap_or_default()
     }
 
     async fn runtime_status(&self) -> RuntimeStatusPayload {
