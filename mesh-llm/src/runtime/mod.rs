@@ -11,7 +11,7 @@ use self::local::{
 };
 use self::proxy::{api_proxy, bootstrap_proxy};
 use crate::api;
-use crate::cli::Cli;
+use crate::cli::{Cli, Command};
 use crate::inference::{election, launch};
 use crate::mesh;
 use crate::mesh::NodeRole;
@@ -69,14 +69,10 @@ pub(crate) async fn run() -> Result<()> {
         return plugin::run_plugin_process(name).await;
     }
 
-    let checked_updates = if autoupdate::startup_self_update_enabled(&cli) {
-        autoupdate::maybe_self_update(&cli).await?
-    } else {
-        false
-    };
+    let checked_updates = autoupdate::maybe_auto_update(&cli).await?;
 
     // Finish the release check before startup continues.
-    if !checked_updates {
+    if !checked_updates && !matches!(cli.command, Some(Command::Update)) {
         autoupdate::check_for_update().await;
     }
 

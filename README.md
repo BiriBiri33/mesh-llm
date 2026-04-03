@@ -139,6 +139,12 @@ Installed release bundles use flavor-specific llama.cpp binaries:
 - macOS: `metal`
 - Linux: `cpu`, `cuda`, `rocm`, `vulkan`
 
+To update a bundle install to the latest release:
+
+```bash
+mesh-llm update
+```
+
 If you build from source, always use `just`:
 
 ```bash
