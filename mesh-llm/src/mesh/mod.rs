@@ -574,7 +574,12 @@ fn heartbeat_failure_policy_for_peer(
     if descriptors_share_exact_moe_identity(local_descriptors, &peer.served_model_descriptors) {
         HeartbeatFailurePolicy {
             allow_recent_inbound_grace: false,
-            failure_threshold: 1,
+            // Shared MoE peers should fail down faster than generic peers, but a
+            // single heartbeat miss is too aggressive on relay-heavy or flaky
+            // links. Request-path shard failures still trigger immediate
+            // fail-down; heartbeat-only loss needs a second miss to avoid
+            // tearing down a healthy split on one transient blip.
+            failure_threshold: 2,
         }
     } else {
         HeartbeatFailurePolicy {
@@ -639,7 +644,12 @@ pub(crate) fn peer_is_eligible_for_active_moe(
     peer: &PeerInfo,
     model_name: &str,
 ) -> bool {
-    if !peer.is_assigned_model(model_name) || matches!(peer.role, NodeRole::Client) {
+    let declares_model = peer.is_assigned_model(model_name)
+        || peer
+            .requested_models
+            .iter()
+            .any(|requested| requested == model_name);
+    if !declares_model || matches!(peer.role, NodeRole::Client) {
         return false;
     }
 
@@ -5402,7 +5412,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_exact_moe_identity_disables_recent_inbound_grace() {
+    fn shared_exact_moe_identity_uses_stricter_heartbeat_without_inbound_grace() {
         let mut peer = make_test_peer_info(make_test_endpoint_id(7));
         peer.served_model_descriptors = vec![make_test_moe_descriptor(
             "Qwen3-Coder-Next-Q4_K_M",
@@ -5419,7 +5429,7 @@ mod tests {
             policy,
             HeartbeatFailurePolicy {
                 allow_recent_inbound_grace: false,
-                failure_threshold: 1,
+                failure_threshold: 2,
             }
         );
     }
@@ -5471,6 +5481,26 @@ mod tests {
             std::time::Instant::now()
                 - std::time::Duration::from_secs(MOE_RECOVERY_PROBATION_SECS + 1),
         );
+        assert!(peer_is_eligible_for_active_moe(
+            &local_descriptors,
+            &peer,
+            "Qwen3-Coder-Next-Q4_K_M"
+        ));
+    }
+
+    #[test]
+    fn requested_model_peer_is_eligible_for_active_moe_during_startup() {
+        let mut peer = make_test_peer_info(make_test_endpoint_id(10));
+        peer.requested_models = vec!["Qwen3-Coder-Next-Q4_K_M".to_string()];
+        peer.served_model_descriptors = vec![make_test_moe_descriptor(
+            "Qwen3-Coder-Next-Q4_K_M",
+            "same-model",
+        )];
+        let local_descriptors = vec![make_test_moe_descriptor(
+            "Qwen3-Coder-Next-Q4_K_M",
+            "same-model",
+        )];
+
         assert!(peer_is_eligible_for_active_moe(
             &local_descriptors,
             &peer,

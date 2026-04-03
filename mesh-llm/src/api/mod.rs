@@ -725,6 +725,9 @@ impl MeshApi {
         let mesh_id = node.mesh_id().await;
 
         // Derive node status for display
+        let has_local_model_activity =
+            has_local_processes || !my_hosted_models.is_empty() || !my_serving_models.is_empty();
+
         let node_status = if is_client {
             "Client".to_string()
         } else if effective_is_host && effective_llama_ready {
@@ -737,7 +740,7 @@ impl MeshApi {
             } else {
                 "Serving".to_string()
             }
-        } else if !effective_is_host && !display_model_name.is_empty() {
+        } else if !effective_is_host && has_local_model_activity {
             "Worker (split)".to_string()
         } else if display_model_name.is_empty() {
             if all_peers.is_empty() {

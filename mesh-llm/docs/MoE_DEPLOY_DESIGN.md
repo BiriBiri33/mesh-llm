@@ -50,6 +50,10 @@ The goal is graceful degradation, not perfect steadiness on a broken topology.
 
 - **Recover up cautiously.**
   When a lost node comes back, it should rejoin the mesh first but remain out of active MoE placement until it has stayed healthy for a short probation window.
+- **Use a quiet window before scale-up.**
+  After probation, the leader should still wait for a short quiet period before reconsidering a larger topology.
+- **Only expand when the plan is materially better.**
+  A recovered node being reachable again is not enough by itself. The larger plan should improve fallback coverage, active capacity, or redundancy enough to justify a rebuild.
 - **Avoid topology flapping.**
   The system should fail down faster than it scales back up.
 - **Recompute when membership changes.**
@@ -98,6 +102,7 @@ else:
 - Returns `Vec<NodeAssignment>` — each has `experts`, `n_shared`, `n_unique`
 
 The leader now chooses placement automatically from cluster resources instead of exposing MoE split-planning knobs at runtime. The current planner keeps a healthy active shard set stable, uses overlap-based redundancy in the active split, and reserves a full-coverage fallback replica when there is enough spare capacity.
+Recover-up is intentionally conservative: a recovered node must pass probation, then a quiet window, and then the leader only scales back up if the candidate plan is materially better than the current healthy one.
 
 ### Step 4: Split GGUF (`moe.rs` → `llama-moe-split`)
 

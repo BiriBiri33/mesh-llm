@@ -321,6 +321,8 @@ struct MoePlacementPlan {
     overlap: usize,
 }
 
+const MOE_SCALE_UP_QUIET_SECS: u64 = 45;
+
 #[derive(Clone, Copy, Debug)]
 struct MoePlacementCandidate {
     id: iroh::EndpointId,
@@ -342,12 +344,39 @@ impl MoePlacementPlan {
     fn shard_index_for(&self, my_id: iroh::EndpointId) -> Option<usize> {
         self.active_ids.iter().position(|id| *id == my_id)
     }
+
+    fn materially_improves_upon(&self, current: &Self) -> bool {
+        let improves_fallback = self.fallback_ids.len() > current.fallback_ids.len()
+            && self.active_ids.len() >= current.active_ids.len();
+        let improves_active_count = self.active_ids.len() > current.active_ids.len()
+            && self.fallback_ids.len() >= current.fallback_ids.len();
+        let improves_overlap = self.overlap > current.overlap
+            && self.active_ids.len() >= current.active_ids.len()
+            && self.fallback_ids.len() >= current.fallback_ids.len();
+
+        improves_fallback || improves_active_count || improves_overlap
+    }
 }
 
-fn plan_moe_placement(
+fn running_plan_state<'a>(
+    last_plan: Option<&'a MoePlacementPlan>,
+    currently_running: bool,
+) -> (&'a [iroh::EndpointId], &'a [iroh::EndpointId]) {
+    if currently_running {
+        let active_ids = last_plan
+            .map(|plan| plan.active_ids.as_slice())
+            .unwrap_or(&[]);
+        let fallback_ids = last_plan
+            .map(|plan| plan.fallback_ids.as_slice())
+            .unwrap_or(&[]);
+        (active_ids, fallback_ids)
+    } else {
+        (&[], &[])
+    }
+}
+
+fn compute_best_moe_placement(
     mut candidates: Vec<MoePlacementCandidate>,
-    current_active_ids: &[iroh::EndpointId],
-    current_fallback_ids: &[iroh::EndpointId],
 ) -> Option<MoePlacementPlan> {
     if candidates.is_empty() {
         return None;
@@ -359,40 +388,15 @@ fn plan_moe_placement(
             .then_with(|| a.id.cmp(&b.id))
     });
     let leader_id = candidates[0].id;
-    let candidate_ids: HashSet<_> = candidates.iter().map(|candidate| candidate.id).collect();
-
-    let keep_current_active = !current_active_ids.is_empty()
-        && current_active_ids
-            .iter()
-            .all(|id| candidate_ids.contains(id));
-
-    let mut active_ids: Vec<iroh::EndpointId> = if keep_current_active {
-        current_active_ids.to_vec()
-    } else {
-        candidates.iter().map(|candidate| candidate.id).collect()
-    };
+    let mut active_ids: Vec<iroh::EndpointId> =
+        candidates.iter().map(|candidate| candidate.id).collect();
     active_ids.sort();
     active_ids.dedup();
 
     let mut fallback_ids = Vec::new();
-    if keep_current_active {
-        for id in current_fallback_ids {
-            if candidate_ids.contains(id) && !active_ids.contains(id) {
-                fallback_ids.push(*id);
-            }
-        }
-        if fallback_ids.is_empty() && active_ids.len() >= 3 {
-            if let Some(fallback_candidate) = candidates
-                .iter()
-                .find(|candidate| candidate.full_coverage && !active_ids.contains(&candidate.id))
-            {
-                fallback_ids.push(fallback_candidate.id);
-            }
-        }
-    } else if candidates.len() >= 4 && active_ids.len().saturating_sub(1) >= 3 {
-        if let Some(fallback_candidate) = candidates
-            .iter()
-            .find(|candidate| candidate.full_coverage && !active_ids.is_empty())
+    if active_ids.len() >= 3 {
+        if let Some(fallback_candidate) =
+            candidates.iter().find(|candidate| candidate.full_coverage)
         {
             active_ids.retain(|id| *id != fallback_candidate.id);
             fallback_ids.push(fallback_candidate.id);
@@ -410,6 +414,45 @@ fn plan_moe_placement(
         fallback_ids,
         overlap,
     })
+}
+
+fn plan_moe_placement(
+    candidates: Vec<MoePlacementCandidate>,
+    current_active_ids: &[iroh::EndpointId],
+    current_fallback_ids: &[iroh::EndpointId],
+    allow_scale_up: bool,
+) -> Option<MoePlacementPlan> {
+    let candidate_ids: HashSet<_> = candidates.iter().map(|candidate| candidate.id).collect();
+    let keep_current_active = !current_active_ids.is_empty()
+        && current_active_ids
+            .iter()
+            .all(|id| candidate_ids.contains(id));
+
+    let best = compute_best_moe_placement(candidates.clone())?;
+    if !keep_current_active {
+        return Some(best);
+    }
+
+    let mut stable = MoePlacementPlan {
+        leader_id: best.leader_id,
+        active_ids: current_active_ids.to_vec(),
+        fallback_ids: current_fallback_ids
+            .iter()
+            .copied()
+            .filter(|id| candidate_ids.contains(id) && !current_active_ids.contains(id))
+            .collect(),
+        overlap: if current_active_ids.len() >= 3 { 2 } else { 1 },
+    };
+    stable.active_ids.sort();
+    stable.active_ids.dedup();
+    stable.fallback_ids.sort();
+    stable.fallback_ids.dedup();
+
+    if allow_scale_up && best.materially_improves_upon(&stable) {
+        Some(best)
+    } else {
+        Some(stable)
+    }
 }
 
 /// Look up base MoE config for a model.
@@ -467,16 +510,19 @@ fn lookup_moe_config(
     })
 }
 
-fn should_attempt_local_micro_analyze(model_path: &Path, model_name: &str) -> bool {
+fn should_attempt_local_micro_analyze(
+    model_path: &Path,
+    model_name: &str,
+    local_vram_budget: u64,
+) -> bool {
     let model_bytes = total_model_bytes(model_path);
-    let my_vram = mesh::detect_vram_bytes_capped(None);
     // Require roughly the same headroom we already use for "fits locally" checks.
-    let fits_with_headroom = my_vram >= (model_bytes as f64 * 1.1) as u64;
+    let fits_with_headroom = local_vram_budget >= (model_bytes as f64 * 1.1) as u64;
     if !fits_with_headroom {
         eprintln!(
             "🧩 [{model_name}] Skipping local micro-analyze: model needs about {:.1}GB with headroom, local VRAM is {:.1}GB",
             model_bytes as f64 * 1.1 / 1e9,
-            my_vram as f64 / 1e9
+            local_vram_budget as f64 / 1e9
         );
     }
     fits_with_headroom
@@ -486,6 +532,7 @@ fn resolve_runtime_moe_config(
     model_name: &str,
     model_path: &Path,
     bin_dir: &Path,
+    local_vram_budget: u64,
     options: &moe::MoeRuntimeOptions,
 ) -> anyhow::Result<Option<ResolvedMoeConfig>> {
     let base = match lookup_moe_config(model_name, model_path) {
@@ -510,7 +557,7 @@ fn resolve_runtime_moe_config(
                     artifact.origin.label().to_string(),
                 )
             } else {
-                if should_attempt_local_micro_analyze(model_path, model_name) {
+                if should_attempt_local_micro_analyze(model_path, model_name, local_vram_budget) {
                     match ensure_micro_analyze_ranking(bin_dir, model_name, model_path, options) {
                         Ok(artifact) => (
                             artifact.ranking,
@@ -1183,6 +1230,7 @@ pub async fn election_loop(
                 &model_name,
                 &model,
                 &bin_dir,
+                my_vram,
                 &moe_runtime_options,
             ) {
                 Ok(Some(cfg)) => cfg,
@@ -1580,6 +1628,7 @@ async fn moe_election_loop(
     let mut last_plan: Option<MoePlacementPlan> = None;
     let mut llama_process: Option<launch::InferenceServerProcess> = None;
     let mut current_local_port: Option<u16> = None;
+    let mut last_plan_change_at = tokio::time::Instant::now();
 
     loop {
         if stop_requested(&stop_rx) {
@@ -1592,15 +1641,41 @@ async fn moe_election_loop(
 
         let peers = node.peers().await;
         let local_descriptors = node.served_model_descriptors().await;
-        let eligible_model_peers: Vec<mesh::PeerInfo> = peers
+        let declared_model_peers: Vec<mesh::PeerInfo> = peers
             .iter()
-            .filter(|p| p.is_assigned_model(&model_name))
             .filter(|p| !matches!(p.role, NodeRole::Client))
+            .filter(|peer| {
+                peer.is_assigned_model(&model_name)
+                    || peer
+                        .requested_models
+                        .iter()
+                        .any(|requested| requested == &model_name)
+                    || peer.models.iter().any(|model| model == &model_name)
+            })
+            .cloned()
+            .collect();
+        let eligible_model_peers: Vec<mesh::PeerInfo> = declared_model_peers
+            .iter()
             .filter_map(|peer| {
                 mesh::peer_is_eligible_for_active_moe(&local_descriptors, peer, &model_name)
                     .then_some(peer.clone())
             })
             .collect();
+        let model_fits = my_vram >= (model_bytes as f64 * 1.1) as u64;
+        let placement_peers: Vec<mesh::PeerInfo> = if !currently_running
+            && !model_fits
+            && eligible_model_peers.is_empty()
+        {
+            if !declared_model_peers.is_empty() {
+                eprintln!(
+                        "🧩 [{model_name}] Bootstrapping MoE placement with {} declared peer(s) while active eligibility catches up",
+                        declared_model_peers.len()
+                    );
+            }
+            declared_model_peers.clone()
+        } else {
+            eligible_model_peers.clone()
+        };
         let recovering_peer_count = peers
             .iter()
             .filter(|p| p.is_assigned_model(&model_name))
@@ -1615,31 +1690,28 @@ async fn moe_election_loop(
         }
 
         let my_id = node.id();
-        let model_fits = my_vram >= (model_bytes as f64 * 1.1) as u64;
         let mut candidates = vec![MoePlacementCandidate {
             id: my_id,
             vram_bytes: my_vram,
             full_coverage: model_fits,
         }];
-        candidates.extend(
-            eligible_model_peers
-                .iter()
-                .map(|peer| MoePlacementCandidate {
-                    id: peer.id,
-                    vram_bytes: peer.vram_bytes,
-                    full_coverage: peer.vram_bytes >= (model_bytes as f64 * 1.1) as u64,
-                }),
-        );
-        let current_active_ids = last_plan
-            .as_ref()
-            .map(|plan| plan.active_ids.as_slice())
-            .unwrap_or(&[]);
-        let current_fallback_ids = last_plan
-            .as_ref()
-            .map(|plan| plan.fallback_ids.as_slice())
-            .unwrap_or(&[]);
-        let Some(plan) = plan_moe_placement(candidates, current_active_ids, current_fallback_ids)
-        else {
+        candidates.extend(placement_peers.iter().map(|peer| MoePlacementCandidate {
+            id: peer.id,
+            vram_bytes: peer.vram_bytes,
+            full_coverage: peer.vram_bytes >= (model_bytes as f64 * 1.1) as u64,
+        }));
+        let (current_active_ids, current_fallback_ids) =
+            running_plan_state(last_plan.as_ref(), currently_running);
+        let provisional_best = compute_best_moe_placement(candidates.clone());
+        let allow_scale_up = currently_running
+            && last_plan_change_at.elapsed()
+                >= std::time::Duration::from_secs(MOE_SCALE_UP_QUIET_SECS);
+        let Some(plan) = plan_moe_placement(
+            candidates,
+            current_active_ids,
+            current_fallback_ids,
+            allow_scale_up,
+        ) else {
             tokio::select! {
                 res = peer_rx.changed() => {
                     if res.is_err() { break; }
@@ -1653,17 +1725,36 @@ async fn moe_election_loop(
             continue;
         };
         let role = plan.role_for(my_id);
-        let healthy_reserve_count = eligible_model_peers
+        let healthy_reserve_count = placement_peers
             .iter()
             .filter(|peer| {
                 !plan.active_ids.contains(&peer.id) && !plan.fallback_ids.contains(&peer.id)
             })
             .count();
         if healthy_reserve_count > 0 && currently_running {
-            eprintln!(
-                "🧩 [{model_name}] Keeping {} healthy peer(s) in reserve until the current MoE plan needs expansion",
-                healthy_reserve_count
-            );
+            if !allow_scale_up {
+                let remaining = std::time::Duration::from_secs(MOE_SCALE_UP_QUIET_SECS)
+                    .saturating_sub(last_plan_change_at.elapsed())
+                    .as_secs();
+                eprintln!(
+                    "🧩 [{model_name}] Keeping {} healthy peer(s) in reserve for {}s before considering MoE scale-up",
+                    healthy_reserve_count,
+                    remaining
+                );
+            } else if provisional_best
+                .as_ref()
+                .filter(|best| {
+                    last_plan
+                        .as_ref()
+                        .is_some_and(|current| best.materially_improves_upon(current))
+                })
+                .is_none()
+            {
+                eprintln!(
+                    "🧩 [{model_name}] Keeping {} healthy peer(s) in reserve; the current MoE plan is still preferred",
+                    healthy_reserve_count
+                );
+            }
         }
 
         if currently_running && last_plan.as_ref() == Some(&plan) {
@@ -1706,6 +1797,7 @@ async fn moe_election_loop(
                     );
                     target_tx.send_replace(targets);
                     last_plan = Some(plan);
+                    last_plan_change_at = tokio::time::Instant::now();
                     continue;
                 }
             }
@@ -1724,6 +1816,7 @@ async fn moe_election_loop(
         }
 
         last_plan = Some(plan.clone());
+        last_plan_change_at = tokio::time::Instant::now();
 
         if matches!(role, MoePlacementRole::Standby) {
             eprintln!(
@@ -2023,7 +2116,14 @@ async fn moe_election_loop(
                     );
                 }
                 Err(e) => {
-                    eprintln!("  ❌ Failed to start llama-server: {e}");
+                    eprintln!(
+                        "  ❌ MoE split validation failed for shard {}: {e}",
+                        shard_path.display()
+                    );
+                    eprintln!(
+                        "  ⚠️  [{}] Refusing to enter MoE split mode on this node until the shard validates",
+                        model_name
+                    );
                 }
             }
         }
@@ -2600,6 +2700,7 @@ mod tests {
             ],
             &[],
             &[],
+            true,
         )
         .unwrap();
 
@@ -2635,12 +2736,68 @@ mod tests {
             ],
             &[id_b, id_c],
             &[],
+            false,
         )
         .unwrap();
 
         assert_eq!(plan.active_ids, vec![id_b, id_c]);
         assert_eq!(plan.fallback_ids, Vec::<iroh::EndpointId>::new());
         assert_eq!(plan.overlap, 1);
+    }
+
+    #[test]
+    fn test_plan_moe_placement_scales_up_after_quiet_window_when_materially_better() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let id_c = make_id(3);
+
+        let plan = plan_moe_placement(
+            vec![
+                MoePlacementCandidate {
+                    id: id_a,
+                    vram_bytes: 48,
+                    full_coverage: true,
+                },
+                MoePlacementCandidate {
+                    id: id_b,
+                    vram_bytes: 24,
+                    full_coverage: false,
+                },
+                MoePlacementCandidate {
+                    id: id_c,
+                    vram_bytes: 24,
+                    full_coverage: false,
+                },
+            ],
+            &[id_b, id_c],
+            &[],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(plan.active_ids, vec![id_b, id_c]);
+        assert_eq!(plan.fallback_ids, vec![id_a]);
+        assert_eq!(plan.overlap, 1);
+    }
+
+    #[test]
+    fn test_running_plan_state_ignores_stale_plan_when_not_running() {
+        let id_a = make_id(1);
+        let id_b = make_id(2);
+        let stale = MoePlacementPlan {
+            leader_id: id_a,
+            active_ids: vec![id_a],
+            fallback_ids: vec![id_b],
+            overlap: 1,
+        };
+
+        let (active_ids, fallback_ids) = running_plan_state(Some(&stale), false);
+        assert!(active_ids.is_empty());
+        assert!(fallback_ids.is_empty());
+
+        let (active_ids, fallback_ids) = running_plan_state(Some(&stale), true);
+        assert_eq!(active_ids, &[id_a]);
+        assert_eq!(fallback_ids, &[id_b]);
     }
 
     #[test]

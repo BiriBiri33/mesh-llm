@@ -272,6 +272,15 @@ fn log_tail(path: &Path, max_lines: usize) -> String {
     lines[start..].join("\n")
 }
 
+fn log_tail_message(path: &Path, max_lines: usize) -> String {
+    let tail = log_tail(path, max_lines);
+    if tail.is_empty() {
+        format!("See {}", path.display())
+    } else {
+        format!("See {}:\n{}", path.display(), tail)
+    }
+}
+
 fn parse_available_devices(output: &str) -> Vec<String> {
     let mut devices = Vec::new();
     let mut in_devices = false;
@@ -798,6 +807,17 @@ pub async fn start_llama_server(
                 "Still waiting for llama-server to load model... ({i}s, {transferred} transferred)"
             );
         }
+        if let Some(status) = child.try_wait().with_context(|| {
+            format!(
+                "Failed to poll llama-server status for {}",
+                llama_server.path.display()
+            )
+        })? {
+            anyhow::bail!(
+                "llama-server exited before becoming healthy on port {http_port} (status: {status}). {}",
+                log_tail_message(&llama_log, 80)
+            );
+        }
         if reqwest_health_check(&url).await {
             let pid = child
                 .id()
@@ -824,7 +844,10 @@ pub async fn start_llama_server(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    anyhow::bail!("llama-server failed to become healthy within 600s");
+    anyhow::bail!(
+        "llama-server failed to become healthy within 600s. {}",
+        log_tail_message(&llama_log, 80)
+    );
 }
 
 /// Find an available TCP port

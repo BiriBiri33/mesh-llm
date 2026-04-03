@@ -268,6 +268,35 @@ curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
 
 These are the minimum smoke tests for leader-planned MoE recovery. They should be kept green as the runtime changes.
 
+### 10z. Direct `moe-split` family smoke
+
+Run the direct splitter smoke before remote mesh experiments:
+
+```bash
+just moe-split-smoke
+```
+
+Or target specific families:
+
+```bash
+scripts/moe-split-smoke.sh llama.cpp/build/bin glm-deepseek2 qwen3-a3b
+```
+
+Current preferred family matrix:
+
+| Family | Preferred model |
+|---|---|
+| `qwen3-a3b` | `Qwen3-30B-A3B-Q4_K_M` |
+| `qwen3-next` | `Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf` |
+| `glm-deepseek2` | `GLM-4.7-Flash-Q4_K_M` |
+| `olmoe` | `OLMoE-1B-7B-0924-Instruct-Q4_K_M` or `OLMoE-1B-7B-0125-Instruct-Q4_K_M` |
+
+What it validates:
+
+- `llama-moe-split` can generate both sides of a `2`-way split.
+- Each shard can be loaded by `llama-server`.
+- Splitter regressions fail early with a direct tool-level repro, before the mesh runtime is involved.
+
 ### 11a. Two-node MoE split collapses to one survivor
 
 ```bash
@@ -298,7 +327,9 @@ mesh-llm --model Qwen3-Coder-Next-Q4_K_M --auto --no-self-update --split --join 
 - Restart the dead node.
 - Verify the node reappears in mesh membership.
 - Verify the deployment does **not** immediately expand back up on the first healthy signal.
+- Verify the deployment still does **not** expand during the quiet window after probation expires.
 - Verify the leader keeps the existing healthy shard set unless the larger topology is explicitly needed.
+- If the recovered node enables a materially better plan, verify scale-up happens only after the quiet window, not before.
 
 ### 11d. Full-coverage fallback replica
 

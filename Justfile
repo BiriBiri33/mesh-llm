@@ -325,6 +325,10 @@ test port="9337":
 compat-smoke model:
     scripts/ci-compat-smoke.sh "target/release/mesh-llm" "llama.cpp/build/bin" "{{ model }}"
 
+# Direct splitter smoke for the MoE families we actively use.
+moe-split-smoke families="all":
+    scripts/moe-split-smoke.sh "llama.cpp/build/bin" {{ families }}
+
 # Benchmark sticky-only vs prefix-only affinity on a 3-node local mesh.
 bench-prefix-affinity:
     @scripts/benchmark-prefix-affinity.sh
