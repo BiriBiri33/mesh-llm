@@ -1596,11 +1596,11 @@ export function App() {
                   target="_blank"
                   rel="noreferrer"
                   className="underline-offset-2 hover:text-foreground hover:underline"
-                  title="A newer mesh-llm version is available. Run 'mesh-llm update'"
+                  title="A newer mesh-llm version is available. Run 'mesh-llm update' (bundle installs) or download from the releases page."
                 >
                   {status?.version
-                    ? `✨ New version: v${status.version} -> v${status.latest_version}. Run 'mesh-llm update'`
-                    : `✨ New version: v${status.latest_version}. Run 'mesh-llm update'`}
+                    ? `✨ New version: v${status.version} -> v${status.latest_version}. Run 'mesh-llm update' or download from releases`
+                    : `✨ New version: v${status.latest_version}. Run 'mesh-llm update' or download from releases`}
                 </a>
               </>
             ) : null}
