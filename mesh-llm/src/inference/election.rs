@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::watch;
 
@@ -528,17 +528,72 @@ fn should_suppress_moe_analyze_line(line: &str) -> bool {
     trimmed.is_empty() || trimmed.starts_with("print_info:")
 }
 
+fn should_relay_moe_analyze_warning(line: &str) -> bool {
+    let trimmed = line.trim();
+    if should_suppress_moe_analyze_line(trimmed) {
+        return false;
+    }
+
+    trimmed.starts_with("W ")
+        || trimmed.starts_with("E ")
+        || trimmed.to_ascii_lowercase().contains("failed")
+        || trimmed.to_ascii_lowercase().contains("error")
+}
+
+#[derive(Default)]
+struct MoeAnalyzeProgressState {
+    total_prompts: Option<usize>,
+    last_prompt: Option<usize>,
+}
+
+fn parse_moe_analyze_prompt_total(line: &str) -> Option<usize> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("Running ")?;
+    let prompt_count = rest.split_whitespace().next()?;
+    prompt_count.parse::<usize>().ok()
+}
+
+fn parse_moe_analyze_prompt_progress(line: &str) -> Option<(usize, usize)> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("Prompt ")?;
+    let progress = rest.split(':').next()?.trim();
+    let (current, total) = progress.split_once('/')?;
+    Some((current.parse::<usize>().ok()?, total.parse::<usize>().ok()?))
+}
+
 fn spawn_moe_analyze_log_relay<R: std::io::Read + Send + 'static>(
     reader: R,
     model_name: String,
+    progress: Arc<Mutex<MoeAnalyzeProgressState>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let reader = BufReader::new(reader);
         for line in reader.lines().map_while(Result::ok) {
-            if should_suppress_moe_analyze_line(&line) {
+            if let Some(total) = parse_moe_analyze_prompt_total(&line) {
+                if let Ok(mut state) = progress.lock() {
+                    state.total_prompts = Some(total);
+                }
+                eprintln!("🧩 [{model_name}] MoE analysis progress 0/{total}");
                 continue;
             }
-            eprintln!("  [{model_name}] {line}");
+            if let Some((current, total)) = parse_moe_analyze_prompt_progress(&line) {
+                let mut should_emit = true;
+                if let Ok(mut state) = progress.lock() {
+                    state.total_prompts = Some(total);
+                    if state.last_prompt == Some(current) {
+                        should_emit = false;
+                    } else {
+                        state.last_prompt = Some(current);
+                    }
+                }
+                if should_emit {
+                    eprintln!("🧩 [{model_name}] MoE analysis progress {current}/{total}");
+                }
+                continue;
+            }
+            if should_relay_moe_analyze_warning(&line) {
+                eprintln!("  [{model_name}] {line}");
+            }
         }
     })
 }
@@ -570,9 +625,10 @@ fn ensure_full_analyze_ranking(
     let analyze_bin = resolve_analyze_binary(bin_dir)?;
     let started = std::time::Instant::now();
     eprintln!(
-        "🧩 [{model_name}] MoE analysis mode=full-analyze cache={} (progress from llama-moe-analyze follows)",
+        "🧩 [{model_name}] MoE analysis mode=full-analyze cache={}",
         cached_path.display()
     );
+    let progress = Arc::new(Mutex::new(MoeAnalyzeProgressState::default()));
     let mut child = Command::new(&analyze_bin)
         .args([
             "-m",
@@ -590,14 +646,12 @@ fn ensure_full_analyze_ranking(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let stdout_relay = child
-        .stdout
-        .take()
-        .map(|stdout| spawn_moe_analyze_log_relay(stdout, model_name.to_string()));
-    let stderr_relay = child
-        .stderr
-        .take()
-        .map(|stderr| spawn_moe_analyze_log_relay(stderr, model_name.to_string()));
+    let stdout_relay = child.stdout.take().map(|stdout| {
+        spawn_moe_analyze_log_relay(stdout, model_name.to_string(), Arc::clone(&progress))
+    });
+    let stderr_relay = child.stderr.take().map(|stderr| {
+        spawn_moe_analyze_log_relay(stderr, model_name.to_string(), Arc::clone(&progress))
+    });
     let status = child.wait()?;
     if let Some(handle) = stdout_relay {
         let _ = handle.join();
