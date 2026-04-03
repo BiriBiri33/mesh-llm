@@ -144,6 +144,13 @@ Read `mesh-llm/docs/TESTING.md` before running tests. It has all test scenarios,
 
 Before committing Rust changes, format only the changed Rust files from the repo root, for example with `cargo fmt --all -- path/to/file.rs`, and include those formatting changes in the commit.
 
+## Warnings
+
+Do not leave Rust compiler warnings behind in code you touched.
+
+- Fix or remove unused code, dead code, and other warnings introduced or surfaced by your change before committing.
+- Do not silence warnings with `#[allow(...)]` unless there is a clear reason and the developer has asked for that tradeoff.
+
 ### Deploy to Remote
 
 ```bash

@@ -65,8 +65,7 @@ pub async fn download_exact_ref(input: &str) -> Result<PathBuf> {
                 return Ok(dest);
             }
             eprintln!("📥 Downloading {}...", dest.display());
-            catalog::download_url(&url, &dest).await?;
-            Ok(dest)
+            catalog::download_hf_split_gguf(&url, &filename).await
         }
     }
 }

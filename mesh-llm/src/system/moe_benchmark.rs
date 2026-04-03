@@ -89,7 +89,6 @@ struct AnalyzeExpertMass {
 #[derive(Clone, Debug)]
 struct AnalyzeMassProfile {
     entries: Vec<AnalyzeExpertMass>,
-    rank_by_expert: HashMap<u32, usize>,
     mass_by_expert: HashMap<u32, f64>,
     total_mass: f64,
 }
@@ -897,17 +896,14 @@ fn load_analyze_mass_profile(path: &Path) -> Result<AnalyzeMassProfile> {
         );
     }
 
-    let mut rank_by_expert = HashMap::new();
     let mut mass_by_expert = HashMap::new();
     let total_mass = entries.iter().map(|entry| entry.gate_mass).sum::<f64>();
-    for (idx, entry) in entries.iter().enumerate() {
-        rank_by_expert.insert(entry.expert_id, idx);
+    for entry in &entries {
         mass_by_expert.insert(entry.expert_id, entry.gate_mass);
     }
 
     Ok(AnalyzeMassProfile {
         entries,
-        rank_by_expert,
         mass_by_expert,
         total_mass,
     })
@@ -1264,15 +1260,12 @@ mod tests {
                 selection_count: 5,
             },
         ];
-        let mut rank_by_expert = HashMap::new();
         let mut mass_by_expert = HashMap::new();
-        for (idx, entry) in entries.iter().enumerate() {
-            rank_by_expert.insert(entry.expert_id, idx);
+        for entry in &entries {
             mass_by_expert.insert(entry.expert_id, entry.gate_mass);
         }
         AnalyzeMassProfile {
             entries,
-            rank_by_expert,
             mass_by_expert,
             total_mass: 100.0,
         }

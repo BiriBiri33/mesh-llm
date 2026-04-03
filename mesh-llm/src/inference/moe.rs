@@ -733,12 +733,6 @@ fn write_shared_ranking_artifact(
     Ok(())
 }
 
-/// Path to cached heuristic ranking CSV for a model.
-/// Stored under the mesh-llm cache root with a distinct suffix per heuristic.
-pub fn heuristic_ranking_cache_path(model_path: &Path) -> PathBuf {
-    heuristic_ranking_cache_path_for_method(model_path, HeuristicScoreMethod::MeanL2)
-}
-
 pub fn heuristic_ranking_cache_path_for_method(
     model_path: &Path,
     method: HeuristicScoreMethod,
@@ -938,15 +932,6 @@ pub struct ExpertGateStats {
     pub mean_l2: f64,
     pub max_l2: f64,
     pub stddev_l2: f64,
-    pub layer_count: usize,
-}
-
-/// Approximate expert ranking using average router-gate L2 norms across layers.
-///
-/// This mirrors the heuristic used by llama.cpp's `llama-moe-split --balanced`,
-/// but returns a global expert ordering rather than direct groups.
-pub fn compute_heuristic_ranking(model_path: &Path, expert_count: u32) -> anyhow::Result<Vec<u32>> {
-    compute_heuristic_ranking_with_method(model_path, expert_count, HeuristicScoreMethod::MeanL2)
 }
 
 pub fn compute_heuristic_ranking_with_method(
@@ -1117,7 +1102,6 @@ pub fn compute_gate_statistics(
             mean_l2,
             max_l2,
             stddev_l2: variance.sqrt(),
-            layer_count: n_layers,
         });
     }
     Ok(stats)
@@ -1179,6 +1163,7 @@ pub struct NodeAssignment {
 ///
 /// Returns one NodeAssignment per node. Every expert appears in at least one node.
 /// Convenience wrapper for compute_assignments_with_overlap with overlap=1.
+#[cfg(test)]
 pub fn compute_assignments(
     ranking: &[u32],
     n_nodes: usize,
@@ -1611,7 +1596,8 @@ mod tests {
         }
         drop(file);
 
-        let ranking = compute_heuristic_ranking(&path, 4).unwrap();
+        let ranking =
+            compute_heuristic_ranking_with_method(&path, 4, HeuristicScoreMethod::MeanL2).unwrap();
         assert_eq!(ranking, vec![0, 3, 2, 1]);
 
         let _ = std::fs::remove_dir_all(&dir);
