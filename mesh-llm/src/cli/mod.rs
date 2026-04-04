@@ -3,6 +3,28 @@ use std::path::PathBuf;
 
 use crate::cli::runtime::RuntimeCommand;
 
+#[derive(Subcommand, Debug)]
+pub(crate) enum AuthCommand {
+    /// Generate a new owner keypair and save to keystore.
+    Init {
+        /// Path to the keystore file (default: ~/.mesh-llm/owner-keystore.json).
+        #[arg(long)]
+        owner_key: Option<PathBuf>,
+        /// Overwrite an existing keystore.
+        #[arg(long)]
+        force: bool,
+        /// Skip passphrase prompt (store keys unencrypted).
+        #[arg(long)]
+        no_passphrase: bool,
+    },
+    /// Show current owner identity status.
+    Status {
+        /// Path to the keystore file.
+        #[arg(long)]
+        owner_key: Option<PathBuf>,
+    },
+}
+
 pub(crate) mod commands;
 pub mod models;
 pub(crate) mod runtime;
@@ -291,6 +313,11 @@ pub(crate) enum Command {
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
+    },
+    /// Manage owner identity and keystore.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
     },
 }
 

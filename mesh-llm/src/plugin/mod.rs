@@ -28,6 +28,8 @@ use self::support::{format_args_for_log, format_slice_for_log, format_tool_names
 use self::transport::make_instance_id;
 #[cfg(all(test, unix))]
 use self::transport::unix_socket_path;
+#[cfg(all(test, windows))]
+use self::transport::windows_pipe_name;
 #[cfg(test)]
 use mesh_llm_plugin::MeshVisibility;
 

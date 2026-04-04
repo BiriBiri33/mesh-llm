@@ -241,7 +241,7 @@ pub(crate) fn unix_socket_path(instance_id: &str, name: &str) -> Result<PathBuf>
 }
 
 #[cfg(windows)]
-fn windows_pipe_name(instance_id: &str, name: &str) -> String {
+pub(crate) fn windows_pipe_name(instance_id: &str, name: &str) -> String {
     format!(r"\\.\pipe\mesh-llm-{instance_id}-{name}")
 }
 

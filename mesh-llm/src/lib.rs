@@ -1,5 +1,6 @@
 mod api;
 mod cli;
+pub mod crypto;
 mod inference;
 mod mesh;
 mod models;

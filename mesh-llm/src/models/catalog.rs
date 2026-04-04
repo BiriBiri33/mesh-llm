@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use hf_hub::api::Progress as HfProgress;
 use hf_hub::{Repo, RepoType};
 use serde::Deserialize;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
+use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -274,7 +274,11 @@ async fn download_hf_assets(label: &str, assets: Vec<HfAsset>) -> Result<Vec<Pat
     let label = label.to_string();
     #[cfg(test)]
     {
-        let func = DOWNLOAD_HF_ASSETS_OVERRIDE.lock().unwrap().get(&label).cloned();
+        let func = DOWNLOAD_HF_ASSETS_OVERRIDE
+            .lock()
+            .unwrap()
+            .get(&label)
+            .cloned();
         if let Some(func) = func {
             return func(&label, assets);
         }
@@ -1034,13 +1038,19 @@ mod tests {
     #[test]
     fn path_file_name_matches_nested_path_ignore_case() {
         let path = Path::new("/tmp/cache/Subdir/Model.Q4_K_M.gguf");
-        assert!(path_suffix_matches_ignore_case(path, "subdir/model.q4_k_m.gguf"));
+        assert!(path_suffix_matches_ignore_case(
+            path,
+            "subdir/model.q4_k_m.gguf"
+        ));
     }
 
     #[test]
     fn path_file_name_matches_rejects_wrong_suffix() {
         let path = Path::new("/tmp/cache/other/Model.Q4_K_M.gguf");
-        assert!(!path_suffix_matches_ignore_case(path, "subdir/model.q4_k_m.gguf"));
+        assert!(!path_suffix_matches_ignore_case(
+            path,
+            "subdir/model.q4_k_m.gguf"
+        ));
     }
 
     #[tokio::test]
