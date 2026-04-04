@@ -123,6 +123,27 @@ pub struct PluginManifestOverview {
     pub capabilities: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct PluginEndpointSummary {
+    pub plugin_name: String,
+    pub plugin_status: String,
+    pub endpoint_id: String,
+    pub state: String,
+    pub available: bool,
+    pub kind: String,
+    pub transport_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    pub supports_streaming: bool,
+    pub managed_by_plugin: bool,
+}
+
 #[derive(Clone)]
 pub struct PluginManager {
     inner: Arc<PluginManagerInner>,
@@ -239,6 +260,41 @@ impl PluginManager {
         summaries.extend(self.inner.inactive.values().cloned());
         summaries.sort_by(|a, b| a.name.cmp(&b.name));
         summaries
+    }
+
+    pub async fn endpoints(&self) -> Result<Vec<PluginEndpointSummary>> {
+        let summaries = self.list().await;
+        let mut endpoints = Vec::new();
+        for summary in summaries {
+            let Ok(Some(manifest)) = self.manifest(&summary.name).await else {
+                continue;
+            };
+            let (state, available) = endpoint_state_from_plugin_status(&summary);
+            for endpoint in manifest.endpoints {
+                endpoints.push(PluginEndpointSummary {
+                    plugin_name: summary.name.clone(),
+                    plugin_status: summary.status.clone(),
+                    endpoint_id: endpoint.endpoint_id,
+                    state: state.to_string(),
+                    available,
+                    kind: endpoint_kind_name(endpoint.kind).to_string(),
+                    transport_kind: endpoint_transport_kind_name(endpoint.transport_kind)
+                        .to_string(),
+                    protocol: endpoint.protocol,
+                    address: endpoint.address,
+                    args: endpoint.args,
+                    namespace: endpoint.namespace,
+                    supports_streaming: endpoint.supports_streaming,
+                    managed_by_plugin: endpoint.managed_by_plugin,
+                });
+            }
+        }
+        endpoints.sort_by(|a, b| {
+            a.plugin_name
+                .cmp(&b.plugin_name)
+                .then_with(|| a.endpoint_id.cmp(&b.endpoint_id))
+        });
+        Ok(endpoints)
     }
 
     pub async fn is_enabled(&self, name: &str) -> bool {
@@ -697,6 +753,19 @@ fn endpoint_transport_kind_name(value: i32) -> &'static str {
     }
 }
 
+fn endpoint_state_from_plugin_status(summary: &PluginSummary) -> (&'static str, bool) {
+    if !summary.enabled || summary.status == "disabled" {
+        return ("unavailable", false);
+    }
+
+    match summary.status.as_str() {
+        "running" => ("healthy", true),
+        "starting" | "restarting" => ("starting", false),
+        "degraded" => ("unhealthy", false),
+        _ => ("unavailable", false),
+    }
+}
+
 pub async fn run_plugin_process(name: String) -> Result<()> {
     match name.as_str() {
         BLACKBOARD_PLUGIN_ID => crate::plugins::blackboard::run_plugin(name).await,
@@ -820,6 +889,48 @@ mod tests {
         assert_eq!(
             windows_pipe_name("p1234-deadbeef", "Pipes"),
             r"\\.\pipe\mesh-llm-p1234-deadbeef-Pipes"
+        );
+    }
+
+    #[test]
+    fn running_plugin_endpoints_are_healthy() {
+        let summary = PluginSummary {
+            name: "demo".into(),
+            kind: "external".into(),
+            enabled: true,
+            status: "running".into(),
+            version: None,
+            capabilities: Vec::new(),
+            command: None,
+            args: Vec::new(),
+            tools: Vec::new(),
+            manifest: None,
+            error: None,
+        };
+        assert_eq!(
+            endpoint_state_from_plugin_status(&summary),
+            ("healthy", true)
+        );
+    }
+
+    #[test]
+    fn restarting_plugin_endpoints_are_not_available() {
+        let summary = PluginSummary {
+            name: "demo".into(),
+            kind: "external".into(),
+            enabled: true,
+            status: "restarting".into(),
+            version: None,
+            capabilities: Vec::new(),
+            command: None,
+            args: Vec::new(),
+            tools: Vec::new(),
+            manifest: None,
+            error: Some("timed out".into()),
+        };
+        assert_eq!(
+            endpoint_state_from_plugin_status(&summary),
+            ("starting", false)
         );
     }
 }

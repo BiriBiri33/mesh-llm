@@ -3,6 +3,7 @@
 //! Endpoints:
 //!   GET  /api/status    — live mesh state (JSON)
 //!   GET  /api/runtime   — local model state (JSON)
+//!   GET  /api/runtime/endpoints — registered plugin endpoint state (JSON)
 //!   GET  /api/runtime/processes — local inference process state (JSON)
 //!   POST /api/runtime/models — load a local model
 //!   DELETE /api/runtime/models/{model} — unload a local model

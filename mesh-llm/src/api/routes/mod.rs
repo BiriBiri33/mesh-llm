@@ -25,6 +25,7 @@ pub(super) async fn dispatch_request(
         ("GET", "/api/status")
         | ("GET", "/api/models")
         | ("GET", "/api/runtime")
+        | ("GET", "/api/runtime/endpoints")
         | ("GET", "/api/runtime/processes")
         | ("POST", "/api/runtime/models")
         | ("GET", "/api/events") => {
@@ -36,6 +37,10 @@ pub(super) async fn dispatch_request(
             Ok(true)
         }
         ("GET", "/api/plugins") => {
+            plugins::handle(stream, state, method, path, path_only, body).await?;
+            Ok(true)
+        }
+        ("GET", "/api/plugins/endpoints") => {
             plugins::handle(stream, state, method, path, path_only, body).await?;
             Ok(true)
         }

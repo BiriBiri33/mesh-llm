@@ -18,6 +18,7 @@ pub(super) async fn handle(
 ) -> anyhow::Result<()> {
     match (method, path_only) {
         ("GET", "/api/plugins") => handle_list(stream, state).await,
+        ("GET", "/api/plugins/endpoints") => handle_endpoints(stream, state).await,
         ("GET", p) if p.starts_with("/api/plugins/") && p.ends_with("/manifest") => {
             handle_manifest(stream, state, p).await
         }
@@ -47,6 +48,15 @@ async fn handle_list(stream: &mut TcpStream, state: &MeshApi) -> anyhow::Result<
         json
     );
     stream.write_all(resp.as_bytes()).await?;
+    Ok(())
+}
+
+async fn handle_endpoints(stream: &mut TcpStream, state: &MeshApi) -> anyhow::Result<()> {
+    let plugin_manager = state.inner.lock().await.plugin_manager.clone();
+    match plugin_manager.endpoints().await {
+        Ok(endpoints) => respond_json(stream, 200, &endpoints).await?,
+        Err(err) => respond_error(stream, 500, &err.to_string()).await?,
+    }
     Ok(())
 }
 
