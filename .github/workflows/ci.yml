@@ -129,7 +129,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DLLAMA_OPENSSL=OFF \
             "${CACHE_FLAGS[@]}"
-          cmake --build llama.cpp/build --config Release -j$(nproc) --target rpc-server llama-server
+          cmake --build llama.cpp/build --config Release -j$(nproc) --target rpc-server llama-server llama-moe-split
 
       # ── Download model ──
       - name: Cache model
@@ -256,7 +256,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DLLAMA_OPENSSL=OFF \
             "${CACHE_FLAGS[@]}"
-          cmake --build llama.cpp/build --config Release -j$(sysctl -n hw.ncpu) --target rpc-server llama-server
+          cmake --build llama.cpp/build --config Release -j$(sysctl -n hw.ncpu) --target rpc-server llama-server llama-moe-split
 
       # ── Download model ──
       - name: Cache model
