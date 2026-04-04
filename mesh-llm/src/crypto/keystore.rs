@@ -452,11 +452,12 @@ fn derive_key(
     t_cost: u32,
     p_cost: u32,
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    let params = Params::new(m_cost, t_cost, p_cost, Some(32)).map_err(|e| {
-        CryptoError::InvalidKeyMaterial {
-            reason: format!("invalid argon2 params: {e}"),
-        }
-    })?;
+    let params =
+        Params::new(m_cost, t_cost, p_cost, Some(32 /* output key bytes */)).map_err(|e| {
+            CryptoError::InvalidKeyMaterial {
+                reason: format!("invalid argon2 params: {e}"),
+            }
+        })?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
     argon2
