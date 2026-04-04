@@ -29,8 +29,8 @@ pub use helpers::{
     TaskStore, ToolCallRequest, ToolFuture, ToolRouter,
 };
 pub use io::{
-    connect_from_env, read_envelope, send_bulk_transfer_message, send_channel_message,
-    write_envelope, LocalStream,
+    bind_side_stream, connect_from_env, read_envelope, send_bulk_transfer_message,
+    send_channel_message, write_envelope, LocalListener, LocalStream,
 };
 pub use runtime::{
     MeshVisibility, Plugin, PluginInitializeRequest, PluginMetadata, PluginRuntime,

@@ -28,9 +28,9 @@ pub use self::config::{
 use self::runtime::ExternalPlugin;
 pub(crate) use self::support::parse_optional_json;
 use self::support::{format_args_for_log, format_slice_for_log, format_tool_names_for_log};
-use self::transport::make_instance_id;
 #[cfg(all(test, unix))]
 use self::transport::unix_socket_path;
+use self::transport::{connect_side_stream, make_instance_id, LocalStream};
 #[cfg(test)]
 use mesh_llm_plugin::MeshVisibility;
 
@@ -712,6 +712,28 @@ impl PluginManager {
             .get(plugin_name)
             .with_context(|| format!("Unknown plugin '{plugin_name}'"))?;
         plugin.open_stream(request).await
+    }
+
+    pub(crate) async fn connect_stream(
+        &self,
+        plugin_name: &str,
+        request: proto::OpenStreamRequest,
+    ) -> Result<LocalStream> {
+        let response = self.open_stream(plugin_name, request).await?;
+        if !response.accepted {
+            bail!(
+                "Plugin '{}' rejected stream request: {}",
+                plugin_name,
+                response.message.as_deref().unwrap_or("no reason provided")
+            );
+        }
+        let endpoint = response.endpoint.as_deref().with_context(|| {
+            format!(
+                "Plugin '{}' accepted stream request without an endpoint",
+                plugin_name
+            )
+        })?;
+        connect_side_stream(endpoint, response.transport_kind).await
     }
 
     pub async fn cancel_stream(
