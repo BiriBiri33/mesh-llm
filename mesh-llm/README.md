@@ -50,7 +50,7 @@ The management API exposes the state the UI uses directly:
 
 - `GET /api/status` for node, peer, and routing state
 - `GET /api/events` for live updates
-- `GET /api/models` and runtime endpoints for loaded model/process state
+- `GET /api/models` for mesh model inventory and `GET /api/runtime*` for loaded model/process state
 - `GET /api/discover` for mesh discovery results
 - `GET /api/plugins` plus per-plugin tool endpoints
 - `GET /api/blackboard/feed`, `GET /api/blackboard/search`, `POST /api/blackboard/post`

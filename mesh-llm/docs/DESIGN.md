@@ -177,15 +177,17 @@ and the embedded web dashboard.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | Live mesh state (JSON): node, peers, models, targets |
+| `/api/status` | GET | Live mesh state (JSON): node, peers, routing, targets |
+| `/api/models` | GET | Mesh model inventory for the dashboard and operators |
 | `/api/events` | GET | SSE stream of status updates (2s interval + on change) |
 | `/api/discover` | GET | Browse Nostr-published meshes |
 | `/api/join` | POST | Join a mesh by invite token `{"token":"..."}` |
 | `/api/chat` | POST | Proxy to inference API (`/v1/chat/completions`) |
 | `/` | GET | Embedded web dashboard |
 
-The dashboard is a thin client — everything it shows comes from `/api/status`
-and `/api/events`. Mesh management works without the HTML via curl/scripts.
+The dashboard is a thin client. Live node state comes from `/api/status` and
+`/api/events`, while model inventory comes from `/api/models`. Mesh management
+works without the HTML via curl/scripts.
 
 Always enabled on port 3131 (configurable with `--console <port>`).
 
