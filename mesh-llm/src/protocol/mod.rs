@@ -513,6 +513,7 @@ pub(crate) fn decode_control_frame<T: ValidateControlFrame>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::OwnershipSummary;
     use crate::mesh::{resolve_peer_down, resolve_peer_leaving, ModelDemand, PeerInfo};
     use crate::proto::node::{
         ConfigPush, ConfigPushResponse, ConfigSnapshotResponse, ConfigSubscribe,
@@ -593,7 +594,8 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
+            owner_summary: OwnershipSummary::default(),
         }
     }
 
@@ -642,7 +644,7 @@ mod tests {
             available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)]).unwrap();
 
@@ -1342,7 +1344,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)])
             .expect("JSON serialization must succeed");
@@ -1430,14 +1432,38 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: Some("owner-abc".to_string()),
+            owner_attestation: Some(crate::crypto::SignedNodeOwnership {
+                claim: crate::crypto::NodeOwnershipClaim {
+                    version: 1,
+                    cert_id: "cert-123".to_string(),
+                    owner_id: "owner-abc".to_string(),
+                    owner_sign_public_key: "11".repeat(32),
+                    node_endpoint_id: "22".repeat(32),
+                    issued_at_unix_ms: 10,
+                    expires_at_unix_ms: 20,
+                    node_label: Some("studio".to_string()),
+                    hostname_hint: Some("worker-01".to_string()),
+                },
+                signature: "33".repeat(64),
+            }),
         };
         let proto_pa = local_ann_to_proto_ann(&ann);
-        assert_eq!(proto_pa.owner_id.as_deref(), Some("owner-abc"));
+        assert_eq!(
+            proto_pa
+                .owner_attestation
+                .as_ref()
+                .map(|att| att.owner_id.as_str()),
+            Some("owner-abc")
+        );
 
         let (_, roundtripped) =
             proto_ann_to_local(&proto_pa).expect("proto_ann_to_local must succeed");
-        assert_eq!(roundtripped.owner_id.as_deref(), Some("owner-abc"));
+        let roundtripped = roundtripped
+            .owner_attestation
+            .expect("owner attestation must round-trip");
+        assert_eq!(roundtripped.claim.owner_id, "owner-abc");
+        assert_eq!(roundtripped.claim.cert_id, "cert-123");
+        assert_eq!(roundtripped.claim.node_label.as_deref(), Some("studio"));
     }
 
     #[test]
@@ -1484,7 +1510,8 @@ mod tests {
     #[test]
     fn config_sync_v0_gossip_accepted() {
         // Prove that a V0 JSON gossip frame (PeerAnnouncementV0 without owner fields)
-        // is accepted by the v1 gossip decoder and produces a PeerAnnouncement with owner_id: None.
+        // is accepted by the v1 gossip decoder and produces a PeerAnnouncement without
+        // ownership metadata.
         let remote_id = EndpointId::from(SecretKey::from_bytes(&[0x33; 32]).public());
         let ann = super::PeerAnnouncement {
             addr: EndpointAddr {
@@ -1512,7 +1539,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
         };
         let json = serde_json::to_vec(&vec![PeerAnnouncementV0::from(&ann)])
             .expect("JSON serialization must succeed");
@@ -1530,8 +1557,8 @@ mod tests {
             "decoded addr id must match remote_id"
         );
         assert_eq!(
-            decoded[0].1.owner_id, None,
-            "v0 gossip without owner_id must decode to None"
+            decoded[0].1.owner_attestation, None,
+            "v0 gossip without owner metadata must decode to None"
         );
         assert_eq!(
             decoded[0].1.serving_models.first().map(String::as_str),
@@ -1542,9 +1569,7 @@ mod tests {
 
     #[test]
     fn config_sync_v0_announcement_roundtrip() {
-        // Prove PeerAnnouncementV0 serde handles new fields gracefully:
-        // - owner_id and config_revision ARE serialized (use #[serde(default)])
-        // - config_hash is NOT serialized (uses #[serde(skip_serializing, default)])
+        // PeerAnnouncementV0 must ignore ownership metadata so old JSON peers remain compatible.
         let peer_id = EndpointId::from(SecretKey::from_bytes(&[0x44; 32]).public());
         let ann = super::PeerAnnouncement {
             addr: EndpointAddr {
@@ -1572,102 +1597,35 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: Some("test-owner".to_string()),
+            owner_attestation: Some(crate::crypto::SignedNodeOwnership {
+                claim: crate::crypto::NodeOwnershipClaim {
+                    version: 1,
+                    cert_id: "cert-v0".to_string(),
+                    owner_id: "test-owner".to_string(),
+                    owner_sign_public_key: "44".repeat(32),
+                    node_endpoint_id: "55".repeat(32),
+                    issued_at_unix_ms: 10,
+                    expires_at_unix_ms: 20,
+                    node_label: None,
+                    hostname_hint: None,
+                },
+                signature: "66".repeat(64),
+            }),
         };
 
         let v0 = PeerAnnouncementV0::from(&ann);
         let json_str = serde_json::to_string(&v0).expect("JSON serialization must succeed");
-
-        // Assert owner_id and config_revision ARE in the JSON
         assert!(
-            json_str.contains("\"owner_id\""),
-            "owner_id must be serialized in JSON"
-        );
-        assert!(
-            json_str.contains("\"test-owner\""),
-            "owner_id value must be in JSON"
+            !json_str.contains("owner_attestation"),
+            "v0 JSON must not serialize owner attestation metadata"
         );
 
-        // Deserialize an OLD-format JSON string (without owner_id field)
-        // Create a minimal valid old-format JSON by serializing a v0 without those fields
-        let old_ann = super::PeerAnnouncement {
-            addr: EndpointAddr {
-                id: peer_id,
-                addrs: Default::default(),
-            },
-            role: super::NodeRole::Worker,
-            models: vec![],
-            vram_bytes: 0,
-            model_source: None,
-            serving_models: vec![],
-            hosted_models: None,
-            available_models: vec![],
-            requested_models: vec![],
-            version: None,
-            model_demand: HashMap::new(),
-            mesh_id: None,
-            gpu_name: None,
-            hostname: None,
-            is_soc: None,
-            gpu_vram: None,
-            gpu_bandwidth_gbps: None,
-            available_model_metadata: vec![],
-            experts_summary: None,
-            available_model_sizes: HashMap::new(),
-            served_model_descriptors: vec![],
-            served_model_runtime: vec![],
-            owner_id: None,
-        };
-        let old_v0 = PeerAnnouncementV0::from(&old_ann);
-        let old_json = serde_json::to_string(&old_v0).expect("JSON serialization must succeed");
         let deserialized: PeerAnnouncementV0 =
-            serde_json::from_str(&old_json).expect("old JSON format must deserialize");
+            serde_json::from_str(&json_str).expect("v0 JSON format must deserialize");
         let restored = deserialized.into_internal();
         assert_eq!(
-            restored.owner_id, None,
-            "missing owner_id field must default to None"
-        );
-    }
-
-    #[test]
-    fn config_sync_mixed_version_proto_compat() {
-        // Prove proto3 unknown-field compatibility:
-        // Build a proto PeerAnnouncement WITH owner_id,
-        // encode to bytes, decode back, and verify fields are preserved.
-        use prost::Message as _;
-
-        let owner_id = "owner-x".to_string();
-        let endpoint_id = vec![0x55_u8; 32];
-
-        let proto_ann = crate::proto::node::PeerAnnouncement {
-            endpoint_id: endpoint_id.clone(),
-            owner_id: Some(owner_id.clone()),
-            ..Default::default()
-        };
-
-        let encoded = proto_ann.encode_to_vec();
-        let decoded = crate::proto::node::PeerAnnouncement::decode(encoded.as_slice())
-            .expect("proto decode must succeed");
-
-        assert_eq!(
-            decoded.owner_id.as_deref(),
-            Some("owner-x"),
-            "owner_id must round-trip through proto"
-        );
-
-        // Now test with a proto PeerAnnouncement WITHOUT owner_id
-        let proto_ann_empty = crate::proto::node::PeerAnnouncement {
-            endpoint_id: endpoint_id.clone(),
-            ..Default::default()
-        };
-
-        let encoded_empty = proto_ann_empty.encode_to_vec();
-        let decoded_empty = crate::proto::node::PeerAnnouncement::decode(encoded_empty.as_slice())
-            .expect("proto decode must succeed");
-
-        assert_eq!(
-            decoded_empty.owner_id, None,
-            "missing owner_id must default to None"
+            restored.owner_attestation, None,
+            "v0 JSON round-trip must drop owner attestation metadata"
         );
     }
 
@@ -1878,7 +1836,20 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: Some("mesh-owner".to_string()),
+            owner_attestation: Some(crate::crypto::SignedNodeOwnership {
+                claim: crate::crypto::NodeOwnershipClaim {
+                    version: 1,
+                    cert_id: "mesh-cert".to_string(),
+                    owner_id: "mesh-owner".to_string(),
+                    owner_sign_public_key: "aa".repeat(32),
+                    node_endpoint_id: "bb".repeat(32),
+                    issued_at_unix_ms: 10,
+                    expires_at_unix_ms: 20,
+                    node_label: None,
+                    hostname_hint: None,
+                },
+                signature: "cc".repeat(64),
+            }),
         };
 
         // Convert to V0, serialize to JSON, deserialize back, then convert to internal
@@ -1888,11 +1859,9 @@ mod tests {
             serde_json::from_slice(&json).expect("JSON deserialization must succeed");
         let restored = v0_deserialized[0].clone().into_internal();
 
-        // owner_id and config_revision survive the round-trip
         assert_eq!(
-            restored.owner_id.as_deref(),
-            Some("mesh-owner"),
-            "owner_id must survive v0 JSON round-trip"
+            restored.owner_attestation, None,
+            "v0 JSON round-trip must drop owner attestation metadata"
         );
     }
 
@@ -1925,7 +1894,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
         };
 
         let v0 = PeerAnnouncementV0::from(&ann);
@@ -1934,7 +1903,10 @@ mod tests {
             serde_json::from_slice(&json).expect("JSON deserialization must succeed");
         let internal = v0_deserialized[0].clone().into_internal();
 
-        assert_eq!(internal.owner_id, None, "v0 peer has no owner_id");
+        assert_eq!(
+            internal.owner_attestation, None,
+            "v0 peer has no ownership attestation"
+        );
     }
 
     #[test]

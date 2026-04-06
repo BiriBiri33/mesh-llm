@@ -15,6 +15,12 @@ use std::sync::Arc;
 
 use tokio::sync::{watch, Mutex};
 
+use crate::crypto::{
+    certificate_needs_renewal, default_node_ownership_path, load_node_ownership,
+    save_node_ownership, sign_node_ownership, verify_node_ownership, OwnershipStatus,
+    OwnershipSummary, SignedNodeOwnership, TrustPolicy, TrustStore,
+    DEFAULT_NODE_CERT_LIFETIME_SECS, DEFAULT_NODE_CERT_RENEW_WINDOW_SECS,
+};
 use crate::inference::moe;
 use crate::protocol::*;
 
@@ -41,6 +47,13 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn current_time_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn endpoint_id_hex(id: EndpointId) -> String {
@@ -795,6 +808,50 @@ fn peer_meaningfully_changed(old: &PeerInfo, new: &PeerInfo) -> bool {
         || old.served_model_descriptors != new.served_model_descriptors
         || old.served_model_runtime != new.served_model_runtime
         || old.version != new.version
+        || old.owner_summary != new.owner_summary
+}
+
+fn policy_accepts_peer(policy: TrustPolicy, owner_summary: &OwnershipSummary) -> bool {
+    match policy {
+        TrustPolicy::Off | TrustPolicy::PreferOwned => true,
+        TrustPolicy::RequireOwned | TrustPolicy::Allowlist => {
+            owner_summary.status == OwnershipStatus::Verified
+        }
+    }
+}
+
+fn load_or_refresh_owner_attestation(
+    owner_keypair: &crate::crypto::OwnerKeypair,
+    endpoint_id: EndpointId,
+    node_label: Option<String>,
+    hostname_hint: Option<String>,
+) -> Result<SignedNodeOwnership> {
+    let path = default_node_ownership_path()?;
+    if path.exists() {
+        if let Ok(existing) = load_node_ownership(&path) {
+            let owner_matches = existing.claim.owner_id == owner_keypair.owner_id()
+                && existing.claim.node_endpoint_id == hex::encode(endpoint_id.as_bytes());
+            if owner_matches
+                && !certificate_needs_renewal(
+                    &existing,
+                    DEFAULT_NODE_CERT_RENEW_WINDOW_SECS,
+                    current_time_unix_ms(),
+                )
+            {
+                return Ok(existing);
+            }
+        }
+    }
+
+    let ownership = sign_node_ownership(
+        owner_keypair,
+        endpoint_id.as_bytes(),
+        current_time_unix_ms() + DEFAULT_NODE_CERT_LIFETIME_SECS * 1000,
+        node_label,
+        hostname_hint,
+    )?;
+    save_node_ownership(&path, &ownership)?;
+    Ok(ownership)
 }
 
 fn model_identity_score(identity: &ServedModelIdentity) -> u8 {
@@ -889,8 +946,6 @@ pub(crate) struct PeerAnnouncementV0 {
     served_model_descriptors: Vec<ServedModelDescriptor>,
     #[serde(skip_serializing, skip_deserializing, default)]
     served_model_runtime: Vec<ModelRuntimeDescriptor>,
-    #[serde(default)]
-    owner_id: Option<String>,
 }
 
 impl PeerAnnouncementV0 {
@@ -923,7 +978,7 @@ impl PeerAnnouncementV0 {
             available_model_sizes: self.available_model_sizes,
             served_model_descriptors: self.served_model_descriptors,
             served_model_runtime: self.served_model_runtime,
-            owner_id: self.owner_id,
+            owner_attestation: None,
         }
     }
 }
@@ -951,7 +1006,6 @@ impl From<&PeerAnnouncement> for PeerAnnouncementV0 {
             available_model_sizes: ann.available_model_sizes.clone(),
             served_model_descriptors: ann.served_model_descriptors.clone(),
             served_model_runtime: ann.served_model_runtime.clone(),
-            owner_id: ann.owner_id.clone(),
         }
     }
 }
@@ -996,6 +1050,7 @@ fn apply_transitive_ann(
     existing.models = ann.models.clone();
     existing.available_models.clear();
     existing.requested_models = ann.requested_models.clone();
+    existing.owner_attestation = ann.owner_attestation.clone();
     if ann.model_source.is_some() {
         existing.model_source = ann.model_source.clone();
     }
@@ -1063,7 +1118,7 @@ pub(crate) struct PeerAnnouncement {
     pub(crate) available_model_sizes: HashMap<String, u64>,
     pub(crate) served_model_descriptors: Vec<ServedModelDescriptor>,
     pub(crate) served_model_runtime: Vec<ModelRuntimeDescriptor>,
-    pub(crate) owner_id: Option<String>,
+    pub(crate) owner_attestation: Option<SignedNodeOwnership>,
 }
 
 #[derive(Debug, Clone)]
@@ -1106,7 +1161,16 @@ pub struct PeerInfo {
     pub available_model_sizes: HashMap<String, u64>,
     pub served_model_descriptors: Vec<ServedModelDescriptor>,
     pub served_model_runtime: Vec<ModelRuntimeDescriptor>,
-    pub owner_id: Option<String>,
+    pub owner_attestation: Option<SignedNodeOwnership>,
+    pub owner_summary: OwnershipSummary,
+}
+
+#[derive(Debug)]
+pub struct OwnerRuntimeConfig {
+    pub keypair: Option<crate::crypto::OwnerKeypair>,
+    pub node_label: Option<String>,
+    pub trust_store: TrustStore,
+    pub trust_policy: TrustPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -1116,7 +1180,12 @@ pub struct MeshCatalogEntry {
 }
 
 impl PeerInfo {
-    fn from_announcement(id: EndpointId, addr: EndpointAddr, ann: &PeerAnnouncement) -> Self {
+    fn from_announcement(
+        id: EndpointId,
+        addr: EndpointAddr,
+        ann: &PeerAnnouncement,
+        owner_summary: OwnershipSummary,
+    ) -> Self {
         Self {
             id,
             addr,
@@ -1144,7 +1213,8 @@ impl PeerInfo {
             available_model_sizes: ann.available_model_sizes.clone(),
             served_model_descriptors: ann.served_model_descriptors.clone(),
             served_model_runtime: ann.served_model_runtime.clone(),
-            owner_id: ann.owner_id.clone(),
+            owner_attestation: ann.owner_attestation.clone(),
+            owner_summary,
         }
     }
 
@@ -1336,6 +1406,10 @@ pub struct Node {
         tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     plugin_manager: Arc<Mutex<Option<crate::plugin::PluginManager>>>,
     display_name: Arc<Mutex<Option<String>>>,
+    owner_attestation: Arc<Mutex<Option<SignedNodeOwnership>>>,
+    owner_summary: Arc<Mutex<OwnershipSummary>>,
+    trust_store: Arc<Mutex<TrustStore>>,
+    trust_policy: TrustPolicy,
     pub enumerate_host: bool,
     pub gpu_name: Option<String>,
     pub hostname: Option<String>,
@@ -1344,7 +1418,6 @@ pub struct Node {
     pub gpu_bandwidth_gbps: Arc<tokio::sync::Mutex<Option<Vec<f64>>>>,
     config_state: Arc<tokio::sync::Mutex<crate::runtime::config_state::ConfigState>>,
     config_revision_tx: Arc<tokio::sync::watch::Sender<u64>>,
-    cached_owner_id: Option<String>,
 }
 
 struct MeshState {
@@ -1512,12 +1585,17 @@ impl Node {
         self.inflight_change_tx.subscribe()
     }
 
+    pub async fn owner_summary(&self) -> OwnershipSummary {
+        self.owner_summary.lock().await.clone()
+    }
+
     pub async fn start(
         role: NodeRole,
         relay_urls: &[String],
         bind_port: Option<u16>,
         max_vram_gb: Option<f64>,
         enumerate_host: bool,
+        owner_config: Option<OwnerRuntimeConfig>,
     ) -> Result<(Self, TunnelChannels)> {
         // Clients use an ephemeral key so they get a unique identity even
         // when running on the same machine as a GPU node.
@@ -1628,6 +1706,36 @@ impl Node {
             tracing::info!("Detected VRAM: {:.1} GB", vram as f64 / 1e9);
         }
 
+        let trust_store = owner_config
+            .as_ref()
+            .map(|config| config.trust_store.clone())
+            .unwrap_or_default();
+        let trust_policy = owner_config
+            .as_ref()
+            .map(|config| config.trust_policy)
+            .unwrap_or_default();
+        let owner_attestation = match owner_config
+            .as_ref()
+            .and_then(|config| config.keypair.as_ref())
+        {
+            Some(keypair) => Some(load_or_refresh_owner_attestation(
+                keypair,
+                endpoint.id(),
+                owner_config
+                    .as_ref()
+                    .and_then(|config| config.node_label.clone()),
+                hostname.clone(),
+            )?),
+            None => None,
+        };
+        let owner_summary = verify_node_ownership(
+            owner_attestation.as_ref(),
+            endpoint.id().as_bytes(),
+            &trust_store,
+            trust_policy,
+            current_time_unix_ms(),
+        );
+
         let node = Node {
             endpoint,
             public_addr,
@@ -1664,6 +1772,10 @@ impl Node {
             tunnel_http_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
             display_name: Arc::new(Mutex::new(None)),
+            owner_attestation: Arc::new(Mutex::new(owner_attestation)),
+            owner_summary: Arc::new(Mutex::new(owner_summary)),
+            trust_store: Arc::new(Mutex::new(trust_store)),
+            trust_policy,
             enumerate_host,
             gpu_name,
             hostname,
@@ -1692,13 +1804,6 @@ impl Node {
                 };
                 let (tx, _rx) = tokio::sync::watch::channel(revision);
                 Arc::new(tx)
-            },
-            cached_owner_id: {
-                use crate::crypto::{default_keystore_path, load_keystore};
-                default_keystore_path()
-                    .ok()
-                    .and_then(|p| load_keystore(&p, None).ok())
-                    .map(|kp| kp.owner_id())
             },
         };
 
@@ -1780,6 +1885,10 @@ impl Node {
             tunnel_http_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
             display_name: Arc::new(Mutex::new(None)),
+            owner_attestation: Arc::new(Mutex::new(None)),
+            owner_summary: Arc::new(Mutex::new(OwnershipSummary::default())),
+            trust_store: Arc::new(Mutex::new(TrustStore::default())),
+            trust_policy: TrustPolicy::Off,
             enumerate_host: false,
             gpu_name: None,
             hostname: None,
@@ -1793,7 +1902,6 @@ impl Node {
                 let (tx, _rx) = tokio::sync::watch::channel(0u64);
                 Arc::new(tx)
             },
-            cached_owner_id: None,
         })
     }
 
@@ -2080,16 +2188,6 @@ impl Node {
     /// Set the operator-facing display name for this node.
     pub async fn set_display_name(&self, name: String) {
         *self.display_name.lock().await = Some(name);
-    }
-
-    /// Get the operator-facing display name for this node.
-    /// Falls back to the short endpoint ID if no name is set.
-    pub async fn display_name(&self) -> String {
-        if let Some(ref name) = *self.display_name.lock().await {
-            name.clone()
-        } else {
-            self.endpoint.id().fmt_short().to_string()
-        }
     }
 
     pub async fn set_plugin_manager(&self, plugin_manager: crate::plugin::PluginManager) {
@@ -3863,7 +3961,7 @@ impl Node {
             .validate_frame()
             .map_err(|e| anyhow::anyhow!("ConfigSubscribe validation error: {e}"))?;
 
-        let local_owner_id = match self.local_owner_id() {
+        let local_owner_id = match self.local_verified_owner_id().await {
             Some(id) => id,
             None => {
                 let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
@@ -3900,12 +3998,31 @@ impl Node {
             return Ok(());
         }
 
-        if frame.owner_id != local_owner_id {
+        let (subscriber_owner_id, _) = match self.peer_verified_owner(remote).await {
+            Some(owner) => owner,
+            None => {
+                let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
+                    gen: NODE_PROTOCOL_GENERATION,
+                    node_id: vec![],
+                    owner_id: String::new(),
+                    revision: 0,
+                    config_hash: vec![],
+                    config: None,
+                    hostname: None,
+                    error: Some("subscriber is not owner-attested".to_string()),
+                };
+                write_len_prefixed(&mut send, &error_snapshot.encode_to_vec()).await?;
+                return Ok(());
+            }
+        };
+
+        if frame.owner_id != local_owner_id || subscriber_owner_id != local_owner_id {
             tracing::warn!(
-                "config subscribe from {}: owner_id mismatch (want {}, got {})",
+                "config subscribe from {}: owner_id mismatch (want {}, frame {}, subscriber {})",
                 remote.fmt_short(),
                 local_owner_id,
-                frame.owner_id
+                frame.owner_id,
+                subscriber_owner_id
             );
             let error_snapshot = crate::proto::node::ConfigSnapshotResponse {
                 gen: NODE_PROTOCOL_GENERATION,
@@ -3927,7 +4044,7 @@ impl Node {
             ConfigSnapshotResponse {
                 gen: NODE_PROTOCOL_GENERATION,
                 node_id: self.endpoint.id().as_bytes().to_vec(),
-                owner_id: local_owner_id.to_string(),
+                owner_id: local_owner_id.clone(),
                 revision: state.revision(),
                 config_hash: state.config_hash().to_vec(),
                 config: Some(proto_cfg),
@@ -3937,7 +4054,7 @@ impl Node {
         };
         write_len_prefixed(&mut send, &snapshot.encode_to_vec()).await?;
 
-        let owner_id_owned = local_owner_id.to_string();
+        let owner_id_owned = local_owner_id;
         let mut rev_rx = self.config_revision_tx.subscribe();
         loop {
             if rev_rx.changed().await.is_err() {
@@ -3966,8 +4083,27 @@ impl Node {
         Ok(())
     }
 
-    fn local_owner_id(&self) -> Option<&str> {
-        self.cached_owner_id.as_deref()
+    async fn local_verified_owner_id(&self) -> Option<String> {
+        let summary = self.owner_summary.lock().await.clone();
+        if summary.status == OwnershipStatus::Verified {
+            summary.owner_id
+        } else {
+            None
+        }
+    }
+
+    async fn peer_verified_owner(
+        &self,
+        peer_id: EndpointId,
+    ) -> Option<(String, SignedNodeOwnership)> {
+        let state = self.state.lock().await;
+        let peer = state.peers.get(&peer_id)?;
+        if peer.owner_summary.status != OwnershipStatus::Verified {
+            return None;
+        }
+        let owner_id = peer.owner_summary.owner_id.clone()?;
+        let attestation = peer.owner_attestation.clone()?;
+        Some((owner_id, attestation))
     }
 
     // --- Config Push ---
@@ -3996,31 +4132,59 @@ impl Node {
             return Ok(());
         }
 
-        // 2. Derive owner_id from the push's public key
-        let pk_bytes: [u8; 32] = push
-            .owner_signing_public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid public key length"))?;
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes)?;
-        let derived_owner_id = crate::crypto::owner_id_from_verifying_key(&vk);
-
-        if derived_owner_id != push.owner_id {
-            send_push_error(&mut send, "owner_id mismatch").await?;
-            return Ok(());
-        }
-
-        let local_id = match self.local_owner_id() {
+        let local_id = match self.local_verified_owner_id().await {
             Some(id) => id,
             None => {
                 send_push_error(&mut send, "node has no local owner").await?;
                 return Ok(());
             }
         };
-        if local_id != push.owner_id {
+
+        let (requester_owner_id, requester_attestation) =
+            match self.peer_verified_owner(remote).await {
+                Some(owner) => owner,
+                None => {
+                    send_push_error(&mut send, "requester is not owner-attested").await?;
+                    return Ok(());
+                }
+            };
+
+        if requester_owner_id != local_id {
             send_push_error(&mut send, "not the owner of this node").await?;
             return Ok(());
         }
+
+        if push.owner_id != requester_owner_id {
+            send_push_error(&mut send, "owner_id mismatch").await?;
+            return Ok(());
+        }
+
+        let expected_public_key =
+            match hex::decode(&requester_attestation.claim.owner_sign_public_key) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    send_push_error(&mut send, "requester attestation has invalid public key")
+                        .await?;
+                    return Ok(());
+                }
+            };
+        if push.owner_signing_public_key != expected_public_key {
+            send_push_error(
+                &mut send,
+                "push signing key does not match requester attestation",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let pk_bytes: [u8; 32] = match expected_public_key.as_slice().try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                send_push_error(&mut send, "invalid public key length").await?;
+                return Ok(());
+            }
+        };
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes)?;
 
         let payload = config_push_signature_payload(&push);
         let sig_bytes: [u8; 64] = match push.signature.as_slice().try_into() {
@@ -4499,6 +4663,26 @@ impl Node {
 
     async fn add_peer(&self, id: EndpointId, addr: EndpointAddr, ann: &PeerAnnouncement) {
         let imported_ranking = import_remote_moe_rankings(&ann.served_model_descriptors);
+        let trust_store = self.trust_store.lock().await.clone();
+        let owner_summary = verify_node_ownership(
+            ann.owner_attestation.as_ref(),
+            id.as_bytes(),
+            &trust_store,
+            self.trust_policy,
+            current_time_unix_ms(),
+        );
+        if !policy_accepts_peer(self.trust_policy, &owner_summary) {
+            tracing::warn!(
+                "Rejecting peer {} due to owner policy: {:?}",
+                id.fmt_short(),
+                owner_summary.status
+            );
+            let mut state = self.state.lock().await;
+            if state.peers.remove(&id).is_some() {
+                let _ = self.peer_change_tx.send(state.peers.len());
+            }
+            return;
+        }
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() {
             return;
@@ -4547,6 +4731,8 @@ impl Node {
             if recovered {
                 existing.moe_recovered_at = Some(now);
             }
+            existing.owner_attestation = ann.owner_attestation.clone();
+            existing.owner_summary = owner_summary.clone();
             existing.served_model_descriptors = ann.served_model_descriptors.clone();
             existing.served_model_runtime = ann.served_model_runtime.clone();
             if ann.version.is_some() {
@@ -4604,7 +4790,7 @@ impl Node {
             ann.available_models,
             state.peers.len() + 1
         );
-        let mut peer = PeerInfo::from_announcement(id, addr, ann);
+        let mut peer = PeerInfo::from_announcement(id, addr, ann, owner_summary);
         if recovered {
             peer.moe_recovered_at = Some(now);
         }
@@ -4635,6 +4821,21 @@ impl Node {
         ann: &PeerAnnouncement,
     ) {
         let imported_ranking = import_remote_moe_rankings(&ann.served_model_descriptors);
+        let trust_store = self.trust_store.lock().await.clone();
+        let owner_summary = verify_node_ownership(
+            ann.owner_attestation.as_ref(),
+            id.as_bytes(),
+            &trust_store,
+            self.trust_policy,
+            current_time_unix_ms(),
+        );
+        if !policy_accepts_peer(self.trust_policy, &owner_summary) {
+            let mut state = self.state.lock().await;
+            if state.peers.remove(&id).is_some() {
+                let _ = self.peer_change_tx.send(state.peers.len());
+            }
+            return;
+        }
         let mut state = self.state.lock().await;
         if id == self.endpoint.id() {
             return;
@@ -4645,6 +4846,7 @@ impl Node {
         if let Some(existing) = state.peers.get_mut(&id) {
             let old_peer = existing.clone();
             let serving_changed = apply_transitive_ann(existing, addr, ann);
+            existing.owner_summary = owner_summary;
             let updated_peer = existing.clone();
             let changed = peer_meaningfully_changed(&old_peer, &updated_peer);
             if serving_changed {
@@ -4676,7 +4878,7 @@ impl Node {
         } else {
             // New transitive peer — add with last_seen = now but no peer_change event.
             // It will get pruned after PEER_STALE_SECS*2 if never directly contacted.
-            let peer = PeerInfo::from_announcement(id, addr.clone(), ann);
+            let peer = PeerInfo::from_announcement(id, addr.clone(), ann, owner_summary);
             state.peers.insert(id, peer.clone());
             drop(state);
             self.emit_plugin_mesh_event(
@@ -4703,6 +4905,7 @@ impl Node {
         let my_available = self.available_models.lock().await.clone();
         let my_requested = self.requested_models.lock().await.clone();
         let my_mesh_id = self.mesh_id.lock().await.clone();
+        let my_owner_attestation = self.owner_attestation.lock().await.clone();
         let my_demand = self.get_demand();
         let stale_cutoff =
             std::time::Instant::now() - std::time::Duration::from_secs(PEER_STALE_SECS);
@@ -4740,7 +4943,7 @@ impl Node {
                     available_model_sizes: p.available_model_sizes.clone(),
                     served_model_descriptors: p.served_model_descriptors.clone(),
                     served_model_runtime: p.served_model_runtime.clone(),
-                    owner_id: p.owner_id.clone(),
+                    owner_attestation: p.owner_attestation.clone(),
                 })
                 .collect()
         };
@@ -4784,7 +4987,7 @@ impl Node {
             available_model_sizes: my_model_sizes,
             served_model_descriptors: my_served_model_descriptors,
             served_model_runtime: my_model_runtime_descriptors,
-            owner_id: self.local_owner_id().map(str::to_string),
+            owner_attestation: my_owner_attestation,
         });
         announcements
     }
@@ -4874,6 +5077,10 @@ mod tests {
             tunnel_http_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
             display_name: Arc::new(Mutex::new(None)),
+            owner_attestation: Arc::new(Mutex::new(None)),
+            owner_summary: Arc::new(Mutex::new(OwnershipSummary::default())),
+            trust_store: Arc::new(Mutex::new(TrustStore::default())),
+            trust_policy: TrustPolicy::Off,
             enumerate_host: false,
             gpu_name: None,
             hostname: None,
@@ -4887,7 +5094,6 @@ mod tests {
                 let (tx, _rx) = tokio::sync::watch::channel(0u64);
                 Arc::new(tx)
             },
-            cached_owner_id: None,
         };
 
         let accept_node = node.clone();
@@ -5367,7 +5573,6 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
         };
         let legacy_route_table = RoutingTable {
             hosts: vec![RouteEntry {
@@ -5583,7 +5788,6 @@ mod tests {
             available_model_sizes: HashMap::from([("Qwen".into(), 1234_u64)]),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
         };
         let json = serde_json::to_vec(&vec![ann.clone()]).unwrap();
 
@@ -5654,7 +5858,8 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
+            owner_summary: OwnershipSummary::default(),
         }
     }
 
@@ -6143,7 +6348,7 @@ mod tests {
                 context_length: Some(32768),
                 ready: true,
             }],
-            owner_id: None,
+            owner_attestation: None,
         };
 
         let proto_pa = local_ann_to_proto_ann(&local_ann);
@@ -6360,7 +6565,7 @@ mod tests {
             available_model_sizes: new_sizes,
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
         };
 
         apply_transitive_ann(&mut existing, &addr, &ann);
@@ -6428,7 +6633,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
         };
 
         apply_transitive_ann(&mut existing, &weak_addr, &ann);
@@ -6475,7 +6680,7 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
         };
         apply_transitive_ann(&mut existing, &richer_addr, &ann2);
 
@@ -7081,7 +7286,12 @@ mod tests {
 
         // Build PeerInfo as add_peer would, verify passive inventory metadata stays empty.
         let mut peers: HashMap<EndpointId, PeerInfo> = HashMap::new();
-        let peer_info = PeerInfo::from_announcement(peer_id, addr.clone(), &local_ann);
+        let peer_info = PeerInfo::from_announcement(
+            peer_id,
+            addr.clone(),
+            &local_ann,
+            OwnershipSummary::default(),
+        );
         peers.insert(peer_id, peer_info);
 
         let stored = peers.get(&peer_id).unwrap();
@@ -7458,7 +7668,6 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
         };
 
         let server = tokio::spawn(async move {
@@ -7645,7 +7854,6 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
         };
 
         let server = tokio::spawn(async move {
@@ -7854,7 +8062,6 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
         };
         let v0_gossip_json =
             serde_json::to_vec(&vec![v0_ann]).expect("v0 gossip JSON must serialize");
@@ -8074,7 +8281,8 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
+            owner_summary: OwnershipSummary::default(),
         }
     }
 
@@ -8499,23 +8707,20 @@ mod tests {
         );
     }
 
-    /// Helper: create a test node that has a cached owner_id and a config_state
-    /// pointing to the given directory. The `signing_key` is used to derive the
-    /// owner fingerprint; it is NOT stored by the node (tests sign externally).
-    /// Create a test `Node` with a cached `owner_id` derived from `signing_key` and a
+    fn test_owner_keypair(signing_seed: u8, encryption_seed: u8) -> crate::crypto::OwnerKeypair {
+        crate::crypto::OwnerKeypair::from_bytes(&[signing_seed; 32], &[encryption_seed; 32])
+            .expect("test owner keypair must be valid")
+    }
+
+    /// Create a test `Node` with a verified local owner attestation and a
     /// `ConfigState` whose backing file lives in `config_dir`.
-    ///
-    /// The `signing_key` is used **only** to derive the owner fingerprint stored in
-    /// `cached_owner_id`; the node does not retain the key itself. Callers that need
-    /// to sign `ConfigPush` messages must hold on to `signing_key` themselves.
     async fn make_test_node_with_owner(
         role: super::NodeRole,
-        signing_key: &ed25519_dalek::SigningKey,
+        owner_keypair: &crate::crypto::OwnerKeypair,
         config_dir: &std::path::Path,
     ) -> Result<Node> {
         use iroh::endpoint::QuicTransportConfig;
 
-        let owner_id = crate::crypto::owner_id_from_verifying_key(&signing_key.verifying_key());
         let config_path = config_dir.join("config.toml");
         let config_state =
             crate::runtime::config_state::ConfigState::load(&config_path).unwrap_or_default();
@@ -8536,6 +8741,21 @@ mod tests {
         let (tunnel_tx, _tunnel_rx) = tokio::sync::mpsc::channel(8);
         let (tunnel_http_tx, _tunnel_http_rx) = tokio::sync::mpsc::channel(8);
         let revision = config_state.revision();
+        let owner_attestation = sign_node_ownership(
+            owner_keypair,
+            endpoint.id().as_bytes(),
+            current_time_unix_ms() + DEFAULT_NODE_CERT_LIFETIME_SECS * 1000,
+            None,
+            None,
+        )?;
+        let trust_store = TrustStore::default();
+        let owner_summary = verify_node_ownership(
+            Some(&owner_attestation),
+            endpoint.id().as_bytes(),
+            &trust_store,
+            TrustPolicy::Off,
+            current_time_unix_ms(),
+        );
 
         let node = Node {
             endpoint,
@@ -8573,6 +8793,10 @@ mod tests {
             tunnel_http_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
             display_name: Arc::new(Mutex::new(None)),
+            owner_attestation: Arc::new(Mutex::new(Some(owner_attestation))),
+            owner_summary: Arc::new(Mutex::new(owner_summary)),
+            trust_store: Arc::new(Mutex::new(trust_store)),
+            trust_policy: TrustPolicy::Off,
             enumerate_host: false,
             gpu_name: None,
             hostname: None,
@@ -8584,7 +8808,6 @@ mod tests {
                 let (tx, _rx) = tokio::sync::watch::channel(revision);
                 Arc::new(tx)
             },
-            cached_owner_id: Some(owner_id),
         };
 
         let accept_node = node.clone();
@@ -8602,7 +8825,7 @@ mod tests {
     /// and carries `expected_revision` for CAS enforcement. The signature covers the
     /// canonical protobuf encoding of the push with the `signature` field cleared.
     fn build_signed_config_push(
-        signing_key: &ed25519_dalek::SigningKey,
+        owner_keypair: &crate::crypto::OwnerKeypair,
         requester_id: &EndpointId,
         target_node_id: &EndpointId,
         expected_revision: u64,
@@ -8610,8 +8833,8 @@ mod tests {
     ) -> crate::proto::node::ConfigPush {
         use ed25519_dalek::Signer as _;
 
-        let vk = signing_key.verifying_key();
-        let owner_id = crate::crypto::owner_id_from_verifying_key(&vk);
+        let vk = owner_keypair.signing.verifying_key();
+        let owner_id = owner_keypair.owner_id();
 
         let mut push = crate::proto::node::ConfigPush {
             gen: NODE_PROTOCOL_GENERATION,
@@ -8624,7 +8847,7 @@ mod tests {
             signature: vec![0u8; 64],
         };
         let payload = config_push_signature_payload(&push);
-        let sig = signing_key.sign(&payload);
+        let sig = owner_keypair.signing.sign(&payload);
         push.signature = sig.to_bytes().to_vec();
         push
     }
@@ -8648,8 +8871,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_subscribe_matching_owner_receives_snapshot() -> Result<()> {
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x11u8; 32]);
-        let owner_id = crate::crypto::owner_id_from_verifying_key(&signing_key.verifying_key());
+        let owner_keypair = test_owner_keypair(0x11, 0x12);
+        let owner_id = owner_keypair.owner_id();
 
         let tmp = std::env::temp_dir().join(format!("mesh-llm-cfg-sub-{}", rand::random::<u64>()));
         std::fs::create_dir_all(tmp.join("server")).ok();
@@ -8657,12 +8880,12 @@ mod tests {
 
         let server = make_test_node_with_owner(
             super::NodeRole::Host { http_port: 9337 },
-            &signing_key,
+            &owner_keypair,
             &tmp.join("server"),
         )
         .await?;
         let client =
-            make_test_node_with_owner(super::NodeRole::Worker, &signing_key, &tmp.join("client"))
+            make_test_node_with_owner(super::NodeRole::Worker, &owner_keypair, &tmp.join("client"))
                 .await?;
 
         server
@@ -8723,10 +8946,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_subscribe_wrong_owner_returns_error() -> Result<()> {
-        let server_key = ed25519_dalek::SigningKey::from_bytes(&[0x22u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[0x33u8; 32]);
-        let client_owner_id =
-            crate::crypto::owner_id_from_verifying_key(&client_key.verifying_key());
+        let server_owner = test_owner_keypair(0x22, 0x23);
+        let client_owner = test_owner_keypair(0x33, 0x34);
+        let client_owner_id = client_owner.owner_id();
 
         let tmp =
             std::env::temp_dir().join(format!("mesh-llm-cfg-wrong-{}", rand::random::<u64>()));
@@ -8735,12 +8957,12 @@ mod tests {
 
         let server = make_test_node_with_owner(
             super::NodeRole::Host { http_port: 9337 },
-            &server_key,
+            &server_owner,
             &tmp.join("server"),
         )
         .await?;
         let client =
-            make_test_node_with_owner(super::NodeRole::Worker, &client_key, &tmp.join("client"))
+            make_test_node_with_owner(super::NodeRole::Worker, &client_owner, &tmp.join("client"))
                 .await?;
 
         server
@@ -8788,9 +9010,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_subscribe_unowned_node_returns_error() -> Result<()> {
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[0x44u8; 32]);
-        let client_owner_id =
-            crate::crypto::owner_id_from_verifying_key(&client_key.verifying_key());
+        let client_owner = test_owner_keypair(0x44, 0x45);
+        let client_owner_id = client_owner.owner_id();
 
         let tmp =
             std::env::temp_dir().join(format!("mesh-llm-cfg-unowned-{}", rand::random::<u64>()));
@@ -8799,7 +9020,7 @@ mod tests {
         // server has NO owner key (make_test_node, not make_test_node_with_owner)
         let server = make_test_node(super::NodeRole::Host { http_port: 9337 }).await?;
         let client =
-            make_test_node_with_owner(super::NodeRole::Worker, &client_key, &tmp.join("client"))
+            make_test_node_with_owner(super::NodeRole::Worker, &client_owner, &tmp.join("client"))
                 .await?;
 
         server.set_mesh_id("cfg-unowned-mesh-01".to_string()).await;
@@ -8846,7 +9067,7 @@ mod tests {
         use crate::protocol::write_len_prefixed;
         use prost::Message as _;
 
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x55u8; 32]);
+        let owner_keypair = test_owner_keypair(0x55, 0x56);
 
         let tmp =
             std::env::temp_dir().join(format!("mesh-llm-cfg-push-ok-{}", rand::random::<u64>()));
@@ -8855,12 +9076,12 @@ mod tests {
 
         let server = make_test_node_with_owner(
             super::NodeRole::Host { http_port: 9337 },
-            &signing_key,
+            &owner_keypair,
             &tmp.join("server"),
         )
         .await?;
         let client =
-            make_test_node_with_owner(super::NodeRole::Worker, &signing_key, &tmp.join("client"))
+            make_test_node_with_owner(super::NodeRole::Worker, &owner_keypair, &tmp.join("client"))
                 .await?;
 
         server.set_mesh_id("cfg-push-ok-mesh-01".to_string()).await;
@@ -8896,7 +9117,7 @@ mod tests {
             plugins: vec![],
         };
 
-        let push = build_signed_config_push(&signing_key, &client_id, &server_id, 0, new_config);
+        let push = build_signed_config_push(&owner_keypair, &client_id, &server_id, 0, new_config);
 
         let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(&[STREAM_CONFIG_PUSH]).await?;
@@ -8932,7 +9153,7 @@ mod tests {
         use crate::protocol::write_len_prefixed;
         use prost::Message as _;
 
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x66u8; 32]);
+        let owner_keypair = test_owner_keypair(0x66, 0x67);
 
         let tmp =
             std::env::temp_dir().join(format!("mesh-llm-cfg-conflict-{}", rand::random::<u64>()));
@@ -8941,12 +9162,12 @@ mod tests {
 
         let server = make_test_node_with_owner(
             super::NodeRole::Host { http_port: 9337 },
-            &signing_key,
+            &owner_keypair,
             &tmp.join("server"),
         )
         .await?;
         let client =
-            make_test_node_with_owner(super::NodeRole::Worker, &signing_key, &tmp.join("client"))
+            make_test_node_with_owner(super::NodeRole::Worker, &owner_keypair, &tmp.join("client"))
                 .await?;
 
         server.set_mesh_id("cfg-conflict-mesh-01".to_string()).await;
@@ -8983,8 +9204,13 @@ mod tests {
         };
 
         // First push (revision 0 → 1) — must succeed
-        let push1 =
-            build_signed_config_push(&signing_key, &client_id, &server_id, 0, good_config.clone());
+        let push1 = build_signed_config_push(
+            &owner_keypair,
+            &client_id,
+            &server_id,
+            0,
+            good_config.clone(),
+        );
         let (mut send1, mut recv1) = conn.open_bi().await?;
         send1.write_all(&[STREAM_CONFIG_PUSH]).await?;
         write_len_prefixed(&mut send1, &push1.encode_to_vec()).await?;
@@ -8994,7 +9220,8 @@ mod tests {
         assert!(resp1.success, "first push must succeed: {:?}", resp1.error);
 
         // Second push with stale expected_revision=0 — must be rejected
-        let push2 = build_signed_config_push(&signing_key, &client_id, &server_id, 0, good_config);
+        let push2 =
+            build_signed_config_push(&owner_keypair, &client_id, &server_id, 0, good_config);
         let (mut send2, mut recv2) = conn.open_bi().await?;
         send2.write_all(&[STREAM_CONFIG_PUSH]).await?;
         write_len_prefixed(&mut send2, &push2.encode_to_vec()).await?;
@@ -9023,7 +9250,7 @@ mod tests {
         use crate::protocol::write_len_prefixed;
         use prost::Message as _;
 
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x77u8; 32]);
+        let owner_keypair = test_owner_keypair(0x77, 0x78);
 
         let tmp =
             std::env::temp_dir().join(format!("mesh-llm-cfg-badsig-{}", rand::random::<u64>()));
@@ -9032,12 +9259,12 @@ mod tests {
 
         let server = make_test_node_with_owner(
             super::NodeRole::Host { http_port: 9337 },
-            &signing_key,
+            &owner_keypair,
             &tmp.join("server"),
         )
         .await?;
         let client =
-            make_test_node_with_owner(super::NodeRole::Worker, &signing_key, &tmp.join("client"))
+            make_test_node_with_owner(super::NodeRole::Worker, &owner_keypair, &tmp.join("client"))
                 .await?;
 
         server.set_mesh_id("cfg-badsig-mesh-01".to_string()).await;
@@ -9074,7 +9301,7 @@ mod tests {
         };
 
         // Build a push but corrupt the signature
-        let mut push = build_signed_config_push(&signing_key, &client_id, &server_id, 0, config);
+        let mut push = build_signed_config_push(&owner_keypair, &client_id, &server_id, 0, config);
         push.signature = vec![0xDE; 64]; // garbage signature
 
         let (mut send, mut recv) = conn.open_bi().await?;
@@ -9105,8 +9332,8 @@ mod tests {
         use crate::protocol::write_len_prefixed;
         use prost::Message as _;
 
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x88u8; 32]);
-        let owner_id = crate::crypto::owner_id_from_verifying_key(&signing_key.verifying_key());
+        let owner_keypair = test_owner_keypair(0x88, 0x89);
+        let owner_id = owner_keypair.owner_id();
 
         let tmp =
             std::env::temp_dir().join(format!("mesh-llm-cfg-notif-{}", rand::random::<u64>()));
@@ -9115,12 +9342,12 @@ mod tests {
 
         let server = make_test_node_with_owner(
             super::NodeRole::Host { http_port: 9337 },
-            &signing_key,
+            &owner_keypair,
             &tmp.join("server"),
         )
         .await?;
         let client =
-            make_test_node_with_owner(super::NodeRole::Worker, &signing_key, &tmp.join("client"))
+            make_test_node_with_owner(super::NodeRole::Worker, &owner_keypair, &tmp.join("client"))
                 .await?;
 
         server.set_mesh_id("cfg-notif-mesh-01".to_string()).await;
@@ -9165,7 +9392,7 @@ mod tests {
             plugins: vec![],
         };
         let push = build_signed_config_push(
-            &signing_key,
+            &owner_keypair,
             &client_id,
             &server_id,
             initial_revision,
@@ -9328,10 +9555,7 @@ pub fn clear_public_identity() {
 
 /// Load secret key from ~/.mesh-llm/key, or create a new one and save it.
 async fn load_or_create_key() -> Result<SecretKey> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    let dir = home.join(".mesh-llm");
-    let key_path = dir.join("key");
+    let key_path = default_node_key_path()?;
 
     if key_path.exists() {
         let hex = tokio::fs::read_to_string(&key_path).await?;
@@ -9344,11 +9568,37 @@ async fn load_or_create_key() -> Result<SecretKey> {
         return Ok(key);
     }
 
+    let dir = key_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid node key path {}", key_path.display()))?;
     let key = SecretKey::generate(&mut rand::rng());
     tokio::fs::create_dir_all(&dir).await?;
     tokio::fs::write(&key_path, hex::encode(key.to_bytes())).await?;
     tracing::info!("Generated new key, saved to {}", key_path.display());
     Ok(key)
+}
+
+pub fn default_node_key_path() -> Result<std::path::PathBuf> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    Ok(home.join(".mesh-llm").join("key"))
+}
+
+pub fn load_node_key_from_path(path: &std::path::Path) -> Result<SecretKey> {
+    let hex = std::fs::read_to_string(path)?;
+    let bytes = hex::decode(hex.trim())?;
+    if bytes.len() != 32 {
+        anyhow::bail!("Invalid key length in {}", path.display());
+    }
+    Ok(SecretKey::from_bytes(&bytes.try_into().unwrap()))
+}
+
+pub fn save_node_key_to_path(path: &std::path::Path, key: &SecretKey) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, hex::encode(key.to_bytes()))?;
+    Ok(())
 }
 
 #[cfg(test)]

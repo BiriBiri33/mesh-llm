@@ -36,8 +36,21 @@ message PeerAnnouncement {
   repeated ServedModelDescriptor served_model_descriptors = 25;
   repeated ServedModelIdentity served_model_identities = 26;
   repeated ModelRuntimeDescriptor served_model_runtime = 27;
-   optional string owner_id = 28;           // sha256(owner_signing_public_key), 64-char hex
-   reserved 29, 30;  // config_revision and config_hash — moved to subscribe stream only
+  optional SignedNodeOwnership owner_attestation = 28;
+  reserved 29, 30;  // config_revision and config_hash — moved to subscribe stream only
+}
+
+message SignedNodeOwnership {
+  uint32 version = 1;
+  string cert_id = 2;
+  string owner_id = 3;
+  bytes owner_sign_public_key = 4;   // 32 bytes
+  bytes node_endpoint_id = 5;        // 32 bytes
+  uint64 issued_at_unix_ms = 6;
+  uint64 expires_at_unix_ms = 7;
+  optional string node_label = 8;
+  optional string hostname_hint = 9;
+  bytes signature = 10;              // Ed25519 signature over canonical claim bytes
 }
 
 message ServedModelDescriptor {

@@ -5,6 +5,43 @@ use crate::protocol::NODE_PROTOCOL_GENERATION;
 use iroh::{EndpointAddr, EndpointId};
 use std::collections::HashMap;
 
+fn local_owner_attestation_to_proto(
+    attestation: &crate::crypto::SignedNodeOwnership,
+) -> crate::proto::node::SignedNodeOwnership {
+    crate::proto::node::SignedNodeOwnership {
+        version: attestation.claim.version,
+        cert_id: attestation.claim.cert_id.clone(),
+        owner_id: attestation.claim.owner_id.clone(),
+        owner_sign_public_key: hex::decode(&attestation.claim.owner_sign_public_key)
+            .unwrap_or_default(),
+        node_endpoint_id: hex::decode(&attestation.claim.node_endpoint_id).unwrap_or_default(),
+        issued_at_unix_ms: attestation.claim.issued_at_unix_ms,
+        expires_at_unix_ms: attestation.claim.expires_at_unix_ms,
+        node_label: attestation.claim.node_label.clone(),
+        hostname_hint: attestation.claim.hostname_hint.clone(),
+        signature: hex::decode(&attestation.signature).unwrap_or_default(),
+    }
+}
+
+fn proto_owner_attestation_to_local(
+    attestation: &crate::proto::node::SignedNodeOwnership,
+) -> crate::crypto::SignedNodeOwnership {
+    crate::crypto::SignedNodeOwnership {
+        claim: crate::crypto::NodeOwnershipClaim {
+            version: attestation.version,
+            cert_id: attestation.cert_id.clone(),
+            owner_id: attestation.owner_id.clone(),
+            owner_sign_public_key: hex::encode(&attestation.owner_sign_public_key),
+            node_endpoint_id: hex::encode(&attestation.node_endpoint_id),
+            issued_at_unix_ms: attestation.issued_at_unix_ms,
+            expires_at_unix_ms: attestation.expires_at_unix_ms,
+            node_label: attestation.node_label.clone(),
+            hostname_hint: attestation.hostname_hint.clone(),
+        },
+        signature: hex::encode(&attestation.signature),
+    }
+}
+
 fn local_source_kind_to_proto(kind: crate::mesh::ModelSourceKind) -> i32 {
     match kind {
         crate::mesh::ModelSourceKind::Catalog => {
@@ -258,7 +295,10 @@ pub(crate) fn local_ann_to_proto_ann(
         served_model_identities,
         served_model_descriptors,
         served_model_runtime,
-        owner_id: ann.owner_id.clone(),
+        owner_attestation: ann
+            .owner_attestation
+            .as_ref()
+            .map(local_owner_attestation_to_proto),
     }
 }
 
@@ -336,7 +376,6 @@ pub(crate) fn proto_ann_to_local(
             .iter()
             .map(proto_runtime_descriptor_to_local)
             .collect(),
-        owner_id: pa.owner_id.clone(),
         served_model_descriptors: if !pa.served_model_descriptors.is_empty() {
             let descriptors: Vec<_> = pa
                 .served_model_descriptors
@@ -396,6 +435,10 @@ pub(crate) fn proto_ann_to_local(
                 .map(legacy_descriptor_from_identity)
                 .collect()
         },
+        owner_attestation: pa
+            .owner_attestation
+            .as_ref()
+            .map(proto_owner_attestation_to_local),
     };
     crate::mesh::backfill_legacy_descriptors(&mut ann);
     Some((addr, ann))
