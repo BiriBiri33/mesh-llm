@@ -183,7 +183,7 @@ mesh-llm serve --config /path/to/config.toml
 Config precedence:
 
 - Explicit `--model` or `--gguf` ignores configured `[[models]]`.
-- Explicit `--context-size` overrides configured `ctx_size` for the selected startup models.
+- Explicit `--ctx-size` overrides configured `ctx_size` for the selected startup models.
 - `mmproj` is optional and only used when that startup model needs a projector sidecar.
 - Plugin entries stay in the same file.
 

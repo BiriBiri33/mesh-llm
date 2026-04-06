@@ -234,7 +234,7 @@ mesh-llm serve --config /path/to/config.toml
 Precedence rules:
 
 - Explicit `--model` or `--gguf` ignores configured `[[models]]`.
-- Explicit `--context-size` overrides configured `ctx_size` for the selected startup models.
+- Explicit `--ctx-size` overrides configured `ctx_size` for the selected startup models.
 - Plugin entries still live in the same file.
 
 ### No-arg behavior

@@ -122,7 +122,7 @@ Phase 2 keeps this config intentionally local-node only. There is no authored me
 CLI precedence is by concern:
 
 - explicit `--model` or `--gguf` ignores configured `[[models]]`
-- explicit `--context-size` overrides configured `ctx_size`
+- explicit `--ctx-size` overrides configured `ctx_size`
 - plugin config continues to load from the same file
 
 Bare `mesh-llm serve` is the config-owned path. If `[[models]]` is empty, it warns,

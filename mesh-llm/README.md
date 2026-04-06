@@ -101,7 +101,7 @@ args = ["--stdio"]
 ```
 
 `mesh-llm serve` uses `~/.mesh-llm/config.toml` by default, or `--config /path/to/config.toml`.
-Explicit `--model` or `--gguf` ignores configured `[[models]]`, and explicit `--context-size`
+Explicit `--model` or `--gguf` ignores configured `[[models]]`, and explicit `--ctx-size`
 overrides configured `ctx_size` for the selected startup models.
 Bare `mesh-llm serve` warns, shows help, and exits if `[[models]]` is empty.
 

@@ -38,7 +38,7 @@ mesh-llm serve
 - Both configured startup models should be considered for launch
 - If `[[models]]` is empty, `mesh-llm serve` should print a `⚠️` warning, show help, and exit cleanly
 - Explicit `--model` or `--gguf` should ignore configured `[[models]]`
-- Explicit `--context-size` should override configured `ctx_size`
+- Explicit `--ctx-size` should override configured `ctx_size`
 
 ## Single-model permutations
 

@@ -296,8 +296,15 @@ pub(crate) async fn run() -> Result<()> {
     }
     let startup_specs = build_startup_model_specs(&cli, &config)?;
     if should_show_serve_config_help(normalized_args.explicit_surface, &cli, &startup_specs) {
+        let config_path = plugin::config_path(cli.config.as_deref()).unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("~"))
+                .join(".mesh-llm")
+                .join("config.toml")
+        });
         eprintln!(
-            "⚠️ `mesh-llm serve` needs at least one startup model.\n  Add `[[models]]` to ~/.mesh-llm/config.toml, or pass `--model` / `--gguf` explicitly."
+            "⚠️ `mesh-llm serve` needs at least one startup model.\n  Add `[[models]]` to {}, or pass `--model` / `--gguf` explicitly.",
+            config_path.display()
         );
         Cli::command().print_help().ok();
         eprintln!();
