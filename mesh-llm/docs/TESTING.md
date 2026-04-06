@@ -113,7 +113,7 @@ mesh-llm serve --join <TOKEN>
 Compatibility result:
 - Verified on 2026-04-02 with the current `codex/model-identity-design` branch on node 1 and the latest GitHub release `v0.54.0` on node 2.
 - Node 1 served `Llama-3.2-1B-Instruct-Q4_K_M`; node 2 served `Qwen3-4B-Q4_K_M`.
-- `/api/status` and `/v1/models` agreed on the same warm model list from both nodes.
+- `/api/models` and `/v1/models` agreed on the same warm model list from both nodes.
 - Chat from node 1 to node 2's model succeeded, and chat from node 2 to node 1's model succeeded.
 
 ### 7. Auto-assignment
@@ -272,7 +272,7 @@ curl -X POST localhost:3131/api/join -H 'Content-Type: application/json' -d '{"t
 ```bash
 mesh-llm serve --auto
 # After serving:
-curl localhost:3131/api/status   # JSON: node, peers, models, mesh_id, mesh_name
+curl localhost:3131/api/status   # JSON: node, peers, routing, mesh_id, mesh_name
 curl localhost:3131/api/events   # SSE stream
 curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
 ```
