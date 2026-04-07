@@ -55,7 +55,10 @@ update_manifest_version() {
     printf '%s' "$after" >"$file"
 }
 
-mapfile -t manifests < <(
+manifests=()
+while IFS= read -r manifest; do
+    manifests+=("$manifest")
+done < <(
     cd "$REPO_ROOT"
     git ls-files 'mesh-llm/Cargo.toml' 'mesh-llm/**/Cargo.toml' | sort -u
 )
