@@ -1384,7 +1384,7 @@ pub async fn election_loop(
                     if let Some(proxy) = backend_proxy.take() {
                         proxy.shutdown().await;
                     }
-                    tunnel_mgr.set_http_port(0).await;
+                    tunnel_mgr.set_http_port(0);
                     currently_host = false;
                     current_local_port = None;
                     node.set_role(NodeRole::Worker).await;
