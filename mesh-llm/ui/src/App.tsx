@@ -127,7 +127,7 @@ import {
   getAttachmentSendIssue,
   validateAttachmentFile,
 } from "./lib/attachments";
-import { createRafBatcher } from "./lib/streaming";
+import { createRafBatcher, hasBlobContent, parseApiErrorBody } from "./lib/streaming";
 import { cn } from "./lib/utils";
 import {
   TOPOLOGY_LAYOUT_OPTIONS,
@@ -1538,9 +1538,13 @@ export function App() {
       const MAX_RETRIES = 3;
       const RETRY_DELAYS = [1000, 2000, 4000];
       const RETRYABLE = new Set([500, 502, 503]);
+      // Detect multimodal requests — blob tokens are single-use so retrying
+      // with the same tokens will always fail with "Unknown or expired blob
+      // token".  Skip the retry loop for these requests.
+      const effectiveMaxRetries = hasBlobContent(requestInput) ? 1 : MAX_RETRIES;
       let response: Response | null = null;
 
-      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      for (let attempt = 0; attempt < effectiveMaxRetries; attempt++) {
         response = await fetch("/api/responses", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1556,13 +1560,19 @@ export function App() {
           }),
         });
         if (response.ok && response.body) break;
-        if (!RETRYABLE.has(response.status) || attempt === MAX_RETRIES - 1)
+        if (!RETRYABLE.has(response.status) || attempt === effectiveMaxRetries - 1)
           break;
         await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt]));
       }
 
-      if (!response?.ok || !response?.body)
-        throw new Error(`HTTP ${response?.status ?? "unknown"}`);
+      if (!response?.ok || !response?.body) {
+        // Try to extract the real error message from the response body
+        // instead of discarding it and showing only the status code.
+        const errorMessage = response
+          ? await parseApiErrorBody(response)
+          : "HTTP unknown";
+        throw new Error(errorMessage);
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
