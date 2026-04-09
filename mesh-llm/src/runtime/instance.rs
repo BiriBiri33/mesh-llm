@@ -509,70 +509,51 @@ pub mod validate {
         }
 
         fn parse_lstart(s: &str) -> anyhow::Result<Option<i64>> {
-            use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+            use chrono::{Local, NaiveDateTime, TimeZone};
 
-            // split_whitespace collapses double-spaces (e.g. single-digit day padding).
-            // macOS `ps -o lstart=` format: "DoW DD Mon HH:MM:SS YYYY"
-            // e.g. "Tue  7 Apr 22:53:35 2026"
-            let parts: Vec<&str> = s.split_whitespace().collect();
-            if parts.len() != 5 {
-                return Ok(None);
+            // `ps -o lstart=` on macOS uses the BSD `ls_start` format:
+            // "Thu Apr  9 12:34:56 2026". Older observations in this code path
+            // assumed a day-first variant, so accept both orders to stay robust.
+            for fmt in ["%a %b %e %T %Y", "%a %e %b %T %Y"] {
+                let Ok(naive_dt) = NaiveDateTime::parse_from_str(s, fmt) else {
+                    continue;
+                };
+
+                let Some(local_dt) = Local
+                    .from_local_datetime(&naive_dt)
+                    .single()
+                    .or_else(|| Local.from_local_datetime(&naive_dt).earliest())
+                    .or_else(|| Local.from_local_datetime(&naive_dt).latest())
+                else {
+                    continue;
+                };
+
+                return Ok(Some(local_dt.timestamp()));
             }
 
-            // parts[0]=DoW, parts[1]=day, parts[2]=month, parts[3]=HH:MM:SS, parts[4]=year
-            let day: u32 = match parts[1].parse() {
-                Ok(d) => d,
-                Err(_) => return Ok(None),
-            };
-            let month: u32 = match parts[2] {
-                "Jan" => 1,
-                "Feb" => 2,
-                "Mar" => 3,
-                "Apr" => 4,
-                "May" => 5,
-                "Jun" => 6,
-                "Jul" => 7,
-                "Aug" => 8,
-                "Sep" => 9,
-                "Oct" => 10,
-                "Nov" => 11,
-                "Dec" => 12,
-                _ => return Ok(None),
-            };
-            let year: i32 = match parts[4].parse() {
-                Ok(y) => y,
-                Err(_) => return Ok(None),
-            };
+            Ok(None)
+        }
 
-            let time_parts: Vec<&str> = parts[3].split(':').collect();
-            if time_parts.len() != 3 {
-                return Ok(None);
+        #[cfg(test)]
+        mod tests {
+            use super::parse_lstart;
+
+            #[test]
+            fn parse_lstart_accepts_bsd_month_first_format() {
+                let parsed = parse_lstart("Thu Apr  9 12:34:56 2026")
+                    .expect("parse_lstart should not error for valid BSD format");
+                assert!(parsed.is_some(), "month-first BSD format should parse");
             }
-            let (hour, min, sec): (u32, u32, u32) = match (
-                time_parts[0].parse(),
-                time_parts[1].parse(),
-                time_parts[2].parse(),
-            ) {
-                (Ok(h), Ok(m), Ok(s)) => (h, m, s),
-                _ => return Ok(None),
-            };
 
-            let date = match NaiveDate::from_ymd_opt(year, month, day) {
-                Some(d) => d,
-                None => return Ok(None),
-            };
-            let time = match NaiveTime::from_hms_opt(hour, min, sec) {
-                Some(t) => t,
-                None => return Ok(None),
-            };
-            let naive_dt = NaiveDateTime::new(date, time);
-
-            let local_dt = match Local.from_local_datetime(&naive_dt).single() {
-                Some(dt) => dt,
-                None => return Ok(None),
-            };
-
-            Ok(Some(local_dt.timestamp()))
+            #[test]
+            fn parse_lstart_keeps_legacy_day_first_compatibility() {
+                let parsed = parse_lstart("Thu  9 Apr 12:34:56 2026")
+                    .expect("parse_lstart should not error for legacy format");
+                assert!(
+                    parsed.is_some(),
+                    "day-first compatibility format should parse"
+                );
+            }
         }
     }
 
