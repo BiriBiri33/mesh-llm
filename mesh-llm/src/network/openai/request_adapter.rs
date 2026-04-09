@@ -1,4 +1,3 @@
-use crate::network::openai::adapter;
 use anyhow::{anyhow, bail, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,17 +293,6 @@ pub(crate) fn normalize_openai_compat_request(
     path: &str,
     body: &mut serde_json::Value,
 ) -> Result<NormalizationOutcome> {
-    // Typed edge parsing for known OpenAI-compatible request envelopes.
-    match path_only(path) {
-        "/v1/chat/completions" => {
-            let _ = adapter::parse_chat_request(body)?;
-        }
-        "/v1/responses" => {
-            let _ = adapter::parse_responses_request(body)?;
-        }
-        _ => {}
-    }
-
     let Some(object) = body.as_object_mut() else {
         return Ok(NormalizationOutcome {
             changed: false,
