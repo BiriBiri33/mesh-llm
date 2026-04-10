@@ -19,6 +19,7 @@ impl SearchFormatter for JsonFormatter {
             "query": query,
             "filter": filter_name(filter),
             "source": "catalog",
+            "machine": local_capacity_json(),
             "results": [],
         }))
     }
@@ -63,6 +64,7 @@ impl SearchFormatter for JsonFormatter {
             "query": query,
             "filter": filter_name(filter),
             "source": "huggingface",
+            "machine": local_capacity_json(),
             "results": [],
         }))
     }
@@ -228,10 +230,12 @@ impl ModelsFormatter for JsonFormatter {
 
     fn render_updates_status(&self, repo: Option<&str>, all: bool, check: bool) -> Result<()> {
         print_json(json!({
-            "repo": repo,
-            "all": all,
-            "check": check,
             "status": "ok",
+            "mode": if check { "check" } else { "update" },
+            "target": {
+                "repo": repo,
+                "all": all,
+            },
         }))
     }
 }

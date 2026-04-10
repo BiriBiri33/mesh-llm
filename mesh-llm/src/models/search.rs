@@ -1,6 +1,6 @@
 use super::resolve::{
-    file_preference_score, matching_catalog_model_for_huggingface, merge_capabilities,
-    quant_selector_from_gguf_file, remote_hf_size_label_with_api,
+    file_preference_score, is_known_gguf_sidecar, matching_catalog_model_for_huggingface,
+    merge_capabilities, quant_selector_from_gguf_file, remote_hf_size_label_with_api,
 };
 use super::ModelCapabilities;
 use super::{build_hf_tokio_api, capabilities, catalog};
@@ -318,11 +318,6 @@ fn collect_repo_artifact_candidates(siblings: &[String]) -> Vec<RepoArtifactCand
     }
     gguf.extend(mlx);
     gguf
-}
-
-fn is_known_gguf_sidecar(file: &str) -> bool {
-    let basename = file.rsplit('/').next().unwrap_or(file);
-    basename.to_ascii_lowercase().starts_with("mmproj")
 }
 
 fn is_split_mlx_weight_file(file: &str) -> bool {

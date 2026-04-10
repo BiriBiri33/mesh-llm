@@ -145,8 +145,8 @@ pub(crate) fn local_capacity_json() -> Value {
     let vram_bytes = hardware::survey().vram_bytes;
     let vram_gb = vram_bytes as f64 / 1e9;
     json!({
-        "vram_bytes": if vram_bytes > 0 { Some(vram_bytes) } else { None::<u64> },
-        "vram_gb": if vram_gb > 0.0 { Some(vram_gb) } else { None::<f64> },
+        "vram_bytes": vram_bytes,
+        "vram_gb": vram_gb,
     })
 }
 

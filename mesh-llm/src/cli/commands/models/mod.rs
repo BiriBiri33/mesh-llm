@@ -179,7 +179,11 @@ pub async fn run_model_download(
 ) -> Result<()> {
     let formatter = models_formatter(json_output);
     let details = show_exact_model(model_ref).await.ok();
-    let path = download_exact_ref(model_ref).await?;
+    let download_ref = details
+        .as_ref()
+        .map(|d| d.exact_ref.as_str())
+        .unwrap_or(model_ref);
+    let path = download_exact_ref(download_ref).await?;
     if !include_draft {
         return formatter.render_download(model_ref, &path, details.as_ref(), false, None);
     }

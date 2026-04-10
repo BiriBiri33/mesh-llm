@@ -1350,7 +1350,7 @@ fn gguf_matches_quant_selector(file_lower: &str, selector_lower: &str) -> bool {
         || file_lower.ends_with(&format!("/{selector_lower}.gguf"))
 }
 
-fn is_known_gguf_sidecar(file: &str) -> bool {
+pub(super) fn is_known_gguf_sidecar(file: &str) -> bool {
     let basename = file.rsplit('/').next().unwrap_or(file);
     basename.to_ascii_lowercase().starts_with("mmproj")
 }
@@ -1457,26 +1457,24 @@ async fn remote_size_bytes(url: &str) -> Option<u64> {
         .ok()
 }
 
-async fn remote_hf_size_bytes(repo: &str, revision: Option<&str>, file: &str) -> Option<u64> {
-    let url = huggingface_resolve_url(repo, revision, file);
-    remote_size_bytes(&url).await
-}
-
 async fn select_default_hf_file_fit_aware(
     repo: &str,
     revision: Option<&str>,
-    siblings: &[String],
+    siblings: &[(String, Option<u64>)],
 ) -> Option<String> {
-    let mut gguf_candidates = Vec::new();
-    for file in siblings {
+    let mut gguf_candidates: Vec<(String, Option<u64>)> = Vec::new();
+    for (file, api_size) in siblings {
         let lower = file.to_lowercase();
         if !lower.ends_with(".gguf") {
+            continue;
+        }
+        if is_known_gguf_sidecar(file) {
             continue;
         }
         if lower.contains("-000") && !lower.contains("-00001-of-") {
             continue;
         }
-        gguf_candidates.push(file.clone());
+        gguf_candidates.push((file.clone(), *api_size));
     }
     if gguf_candidates.is_empty() {
         return None;
@@ -1485,16 +1483,40 @@ async fn select_default_hf_file_fit_aware(
     let available_bytes = crate::system::hardware::survey().vram_bytes;
     if available_bytes == 0 {
         gguf_candidates.sort_by(|left, right| {
-            file_preference_score(left)
-                .cmp(&file_preference_score(right))
-                .then_with(|| left.cmp(right))
+            file_preference_score(&left.0)
+                .cmp(&file_preference_score(&right.0))
+                .then_with(|| left.0.cmp(&right.0))
         });
-        return gguf_candidates.first().cloned();
+        return gguf_candidates.first().map(|(f, _)| f.clone());
     }
 
+    // Prefer API-provided sizes; only fall back to HEAD for files missing a size.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .user_agent(format!("mesh-llm/{}", crate::VERSION))
+        .build()
+        .ok();
     let mut scored: Vec<(String, Option<u64>)> = Vec::with_capacity(gguf_candidates.len());
-    for file in gguf_candidates {
-        let size = remote_hf_size_bytes(repo, revision, &file).await;
+    for (file, api_size) in gguf_candidates {
+        let size = if api_size.is_some() {
+            api_size
+        } else if let Some(ref c) = client {
+            let url = huggingface_resolve_url(repo, revision, &file);
+            c.head(&url)
+                .send()
+                .await
+                .ok()
+                .and_then(|r| r.error_for_status().ok())
+                .and_then(|r| {
+                    r.headers()
+                        .get(reqwest::header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                })
+        } else {
+            None
+        };
         scored.push((file, size));
     }
     scored.sort_by(|left, right| {
@@ -1530,30 +1552,35 @@ async fn resolve_huggingface_file(
         .info()
         .await
         .with_context(|| format!("Fetch Hugging Face repo {repo}@{revision}"))?;
-    let siblings: Vec<String> = detail
+    let sibling_entries: Vec<(String, Option<u64>)> = detail
         .siblings
         .iter()
-        .map(|sibling| sibling.rfilename.clone())
+        .map(|sibling| (sibling.rfilename.clone(), sibling.size))
         .collect();
-    let has_mlx_weights = siblings.iter().any(|entry| {
-        entry == "model.safetensors"
-            || entry == "model.safetensors.index.json"
-            || is_split_mlx_first_shard(entry)
-    });
+    let siblings: Vec<String> = sibling_entries.iter().map(|(f, _)| f.clone()).collect();
+    let has_mlx_weights = siblings
+        .iter()
+        .any(|entry| entry == "model.safetensors" || is_split_mlx_first_shard(entry));
 
     if file.is_empty() {
         let gguf_only = repo_prefers_gguf_only(repo);
-        if let Some(resolved) =
-            select_default_hf_file_fit_aware(repo, Some(revision), &siblings).await
-        {
-            return Ok(resolved);
-        }
-        if !gguf_only {
-            if let Some(resolved) = select_default_hf_file_from_siblings(&siblings) {
+        if gguf_only {
+            if let Some(resolved) =
+                select_default_hf_file_fit_aware(repo, Some(revision), &sibling_entries).await
+            {
                 return Ok(resolved);
             }
-        } else {
             bail!("No GGUF model files found in {repo}@{revision}.");
+        }
+
+        if let Some(resolved) = select_default_hf_file_from_siblings(&siblings) {
+            return Ok(resolved);
+        }
+
+        if let Some(resolved) =
+            select_default_hf_file_fit_aware(repo, Some(revision), &sibling_entries).await
+        {
+            return Ok(resolved);
         }
     }
     if file == "model" && has_mlx_weights {
