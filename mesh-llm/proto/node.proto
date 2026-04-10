@@ -285,4 +285,6 @@ message ConfigPushResponse {
   optional string error = 5;
   bool saved_to_disk = 6;
   bool applied_live = 7;
+  reserved 8;
+  reserved "apply_mode";
 }

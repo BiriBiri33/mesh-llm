@@ -336,9 +336,16 @@ pub(crate) fn run_status(
         let actual_node_id = node_secret_key
             .as_ref()
             .map(|key| EndpointId::from(key.public()).as_bytes().to_owned())
+            .map(Ok)
             .unwrap_or_else(|| {
-                parse_node_id_hex(&ownership.claim.node_endpoint_id).unwrap_or([0u8; 32])
-            });
+                parse_node_id_hex(&ownership.claim.node_endpoint_id).with_context(|| {
+                    format!(
+                        "failed to parse claim.node_endpoint_id in {}: {}",
+                        node_ownership_path.display(),
+                        ownership.claim.node_endpoint_id
+                    )
+                })
+            })?;
         let summary = verify_node_ownership(
             Some(&ownership),
             &actual_node_id,

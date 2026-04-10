@@ -9542,8 +9542,13 @@ pub fn clear_public_identity() {
 /// Load secret key from ~/.mesh-llm/key, or create a new one and save it.
 async fn load_or_create_key() -> Result<SecretKey> {
     let key_path = default_node_key_path()?;
+    let dir = key_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid node key path {}", key_path.display()))?;
+    ensure_private_node_key_dir(dir)?;
 
     if key_path.exists() {
+        ensure_private_node_key_file(&key_path)?;
         let hex = tokio::fs::read_to_string(&key_path).await?;
         let bytes = hex::decode(hex.trim())?;
         if bytes.len() != 32 {
@@ -9554,12 +9559,8 @@ async fn load_or_create_key() -> Result<SecretKey> {
         return Ok(key);
     }
 
-    let dir = key_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid node key path {}", key_path.display()))?;
     let key = SecretKey::generate(&mut rand::rng());
-    tokio::fs::create_dir_all(&dir).await?;
-    tokio::fs::write(&key_path, hex::encode(key.to_bytes())).await?;
+    save_node_key_to_path(&key_path, &key)?;
     tracing::info!("Generated new key, saved to {}", key_path.display());
     Ok(key)
 }
@@ -9580,10 +9581,60 @@ pub fn load_node_key_from_path(path: &std::path::Path) -> Result<SecretKey> {
 }
 
 pub fn save_node_key_to_path(path: &std::path::Path, key: &SecretKey) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid node key path {}", path.display()))?;
+    ensure_private_node_key_dir(parent)?;
+    if path.exists() {
+        ensure_private_node_key_file(path)?;
     }
-    std::fs::write(path, hex::encode(key.to_bytes()))?;
+    crate::crypto::write_keystore_bytes_atomically(path, hex::encode(key.to_bytes()).as_bytes())?;
+    ensure_private_node_key_file(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_node_key_dir(dir: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(dir)?;
+    let metadata = std::fs::metadata(dir)?;
+    let mut perms = metadata.permissions();
+    if perms.mode() & 0o077 != 0 {
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_node_key_dir(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_node_key_file(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("Node key path is not a regular file");
+    }
+    let mut perms = metadata.permissions();
+    if perms.mode() & 0o077 != 0 {
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_node_key_file(path: &std::path::Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("Node key path is not a regular file");
+    }
     Ok(())
 }
 
