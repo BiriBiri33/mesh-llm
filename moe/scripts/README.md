@@ -62,7 +62,7 @@ data/<namespace>/<repo>/<revision>/gguf/<distribution_id>/<analyzer_id>/
 
 ## `submit_hf_job.py`
 
-Submits a Hugging Face Job that runs [`analyze_and_publish.py`](/Users/jdumay/.codex/worktrees/4dc4/mesh-llm/moe/scripts/analyze_and_publish.py) remotely with the same canonical dataset output contract.
+Submits a Hugging Face Job that runs [`analyze_and_publish.py`](./analyze_and_publish.py) remotely with the same canonical dataset output contract.
 
 Run it with `uv`:
 

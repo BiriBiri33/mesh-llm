@@ -12,6 +12,7 @@ import csv
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -247,21 +248,21 @@ def load_prompts(prompt_file: str | None) -> list[str]:
 
 def resolve_release_target(release_target: str) -> tuple[str, str]:
     if release_target == "auto":
-        if sys.platform == "darwin" and os.uname().machine == "arm64":
+        if sys.platform == "darwin" and platform.machine() == "arm64":
             return "metal", "aarch64-apple-darwin"
-        if sys.platform.startswith("linux") and os.uname().machine in {"x86_64", "amd64"}:
+        if sys.platform.startswith("linux") and platform.machine() in {"x86_64", "amd64"}:
             return "cpu", "x86_64-unknown-linux-gnu"
         raise SystemExit(
-            f"Unsupported platform for release bootstrap: platform={sys.platform} arch={os.uname().machine}"
+            f"Unsupported platform for release bootstrap: platform={sys.platform} arch={platform.machine()}"
         )
 
     if release_target == "metal":
-        if not (sys.platform == "darwin" and os.uname().machine == "arm64"):
+        if not (sys.platform == "darwin" and platform.machine() == "arm64"):
             raise SystemExit("--release-target=metal requires macOS arm64")
         return "metal", "aarch64-apple-darwin"
 
     if release_target in {"cpu", "cuda", "rocm", "vulkan"}:
-        if not (sys.platform.startswith("linux") and os.uname().machine in {"x86_64", "amd64"}):
+        if not (sys.platform.startswith("linux") and platform.machine() in {"x86_64", "amd64"}):
             raise SystemExit(f"--release-target={release_target} requires Linux x86_64")
         return release_target, "x86_64-unknown-linux-gnu"
 
@@ -687,18 +688,23 @@ def remote_artifact_exists(
     distribution: Distribution,
     analyzer_id: str,
 ) -> bool:
-    prefix = relative_artifact_prefix(distribution, analyzer_id).rstrip("/") + "/"
+    prefix = relative_artifact_prefix(distribution, analyzer_id).rstrip("/")
     try:
-        repo_files = api.list_repo_files(
+        repo_tree = api.list_repo_tree(
             repo_id=dataset_repo,
             repo_type="dataset",
             revision=dataset_revision,
+            path_in_repo=prefix,
+            recursive=False,
         )
+        return next(iter(repo_tree), None) is not None
     except Exception as exc:  # pragma: no cover - depends on remote state
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 404:
+            return False
         raise SystemExit(
             f"Failed to inspect dataset repo {dataset_repo}@{dataset_revision}: {exc}"
         ) from exc
-    return any(path.startswith(prefix) for path in repo_files)
 
 
 def local_artifact_exists(artifact_dir: Path) -> bool:

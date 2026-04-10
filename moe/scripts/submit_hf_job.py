@@ -221,9 +221,7 @@ def build_labels(args: argparse.Namespace) -> dict[str, str]:
 
 
 def main() -> int:
-    require_hf_dependencies()
     args = parse_args()
-    token = require_hf_token()
 
     script_path = Path(__file__).with_name("analyze_and_publish.py")
     script_text = script_path.read_text()
@@ -246,6 +244,8 @@ def main() -> int:
         print(" ".join(shlex.quote(part) for part in ["uv", "run", str(script_path), *script_args]))
         return 0
 
+    require_hf_dependencies()
+    token = require_hf_token()
     api = HfApi(token=token)
     job = api.run_uv_job(
         script=script_text,
