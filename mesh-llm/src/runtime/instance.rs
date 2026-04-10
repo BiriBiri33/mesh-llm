@@ -743,10 +743,9 @@ pub mod reap {
 
         let root = root.to_path_buf();
         let my_runtime_dir = my_runtime_dir.to_path_buf();
-        let scan =
-            tokio::task::spawn_blocking(move || scan_cross_runtime_orphans(&root, &my_runtime_dir))
-                .await
-                .context("cross-runtime reap scan task panicked")??;
+        let scan = tokio::task::spawn_blocking(move || scan_cross_runtime_orphans(&root, &my_runtime_dir))
+            .await
+            .context("cross-runtime reap scan task panicked")??;
 
         let mut summary = scan.summary;
         let pending_actions = scan.pending_actions;
@@ -853,10 +852,7 @@ pub mod reap {
         Ok(summary)
     }
 
-    fn scan_cross_runtime_orphans(
-        root: &Path,
-        my_runtime_dir: &Path,
-    ) -> anyhow::Result<ScanResult> {
+    fn scan_cross_runtime_orphans(root: &Path, my_runtime_dir: &Path) -> anyhow::Result<ScanResult> {
         let mut result = ScanResult::default();
         let entries = std::fs::read_dir(root)
             .with_context(|| format!("failed to read runtime root: {}", root.display()))?;
@@ -1024,20 +1020,16 @@ fn binary_process_name(binary: &str) -> Option<String> {
 
     #[cfg(windows)]
     {
-        path.file_stem()
-            .map(|name| name.to_string_lossy().into_owned())
+        path.file_stem().map(|name| name.to_string_lossy().into_owned())
     }
 
     #[cfg(not(windows))]
     {
-        path.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+        path.file_name().map(|name| name.to_string_lossy().into_owned())
     }
 }
 
-pub(crate) fn collect_runtime_stop_targets(
-    root: &Path,
-) -> anyhow::Result<Vec<RuntimeProcessTarget>> {
+pub(crate) fn collect_runtime_stop_targets(root: &Path) -> anyhow::Result<Vec<RuntimeProcessTarget>> {
     if !root.exists() {
         return Ok(Vec::new());
     }
