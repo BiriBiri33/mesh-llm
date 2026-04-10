@@ -129,6 +129,6 @@ After the workflow finishes, verify:
 - The Windows release workflows are compile-and-package only. They do not run inference tests against real GPUs during the workflow.
 - `codesign` and `xattr` may be needed on the receiving machine if macOS Gatekeeper blocks unsigned binaries:
   ```bash
-  codesign -s - /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server /usr/local/bin/llama-moe-analyze /usr/local/bin/llama-moe-split
-  xattr -cr /usr/local/bin/mesh-llm /usr/local/bin/rpc-server /usr/local/bin/llama-server /usr/local/bin/llama-moe-analyze /usr/local/bin/llama-moe-split
+  codesign -s - /usr/local/bin/mesh-llm /usr/local/bin/rpc-server-metal /usr/local/bin/llama-server-metal /usr/local/bin/llama-moe-analyze /usr/local/bin/llama-moe-split
+  xattr -cr /usr/local/bin/mesh-llm /usr/local/bin/rpc-server-metal /usr/local/bin/llama-server-metal /usr/local/bin/llama-moe-analyze /usr/local/bin/llama-moe-split
   ```

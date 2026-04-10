@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -115,15 +116,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--all-layers",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Analyze all layers. Enabled by default.",
-    )
-    parser.add_argument(
-        "--no-all-layers",
-        dest="all_layers",
-        action="store_false",
-        help="Disable --all-layers for micro analysis.",
+        help="Whether to analyze all layers. Enabled by default.",
     )
     parser.add_argument(
         "--prompt-file",
@@ -255,18 +250,24 @@ def release_download_url(release_repo: str, release_tag: str, asset_name: str) -
 
 def download_release_asset(url: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url) as response, destination.open("wb") as handle:
-        handle.write(response.read())
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=120) as response, destination.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
 
 
 def extract_release_binary(archive_path: Path, extract_dir: Path, binary_name: str) -> Path:
     extract_dir.mkdir(parents=True, exist_ok=True)
+    extract_dir_resolved = extract_dir.resolve()
     with tarfile.open(archive_path, "r:gz") as tar:
         members = tar.getmembers()
         matches = [member for member in members if Path(member.name).name == binary_name]
         if not matches:
             raise SystemExit(f"{binary_name} not found in release archive {archive_path}")
         member = matches[0]
+        # Guard against path traversal: ensure the extracted path stays under extract_dir
+        dest = (extract_dir_resolved / member.name).resolve()
+        if not str(dest).startswith(str(extract_dir_resolved) + os.sep):
+            raise SystemExit(f"Refusing to extract unsafe path from archive: {member.name}")
         tar.extract(member, path=extract_dir)
         extracted = extract_dir / member.name
     final_path = extract_dir / binary_name
@@ -668,8 +669,8 @@ def local_artifact_exists(artifact_dir: Path) -> bool:
 
 
 def main() -> int:
-    require_hf_dependencies()
     args = parse_args()
+    require_hf_dependencies()
     api = HfApi()
     analyzer = resolve_analyzer_binary(args)
     distribution = resolve_distribution(

@@ -2,7 +2,7 @@
 
 ## `analyze_and_publish.py`
 
-Downloads a GGUF distribution from Hugging Face, runs `llama-moe-analyze`, writes artifacts in the canonical dataset layout from [../MOE_ANALYZE_STORAGE_SPEC.md](/Users/jdumay/.codex/worktrees/4dc4/mesh-llm/moe/MOE_ANALYZE_STORAGE_SPEC.md), and can upload those artifacts to a dataset repo.
+Downloads a GGUF distribution from Hugging Face, runs `llama-moe-analyze`, writes artifacts in the canonical dataset layout from [../MOE_ANALYZE_STORAGE_SPEC.md](../MOE_ANALYZE_STORAGE_SPEC.md), and can upload those artifacts to a dataset repo.
 
 Run it with `uv`:
 
