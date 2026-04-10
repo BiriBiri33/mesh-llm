@@ -439,36 +439,49 @@ pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
         }
     }
 
-    let variants_started = Instant::now();
-    if interactive {
-        eprintln!("🔎 Fetching GGUF variants from Hugging Face...");
-    }
-    let variants = show_model_variants_with_progress(&details.exact_ref, |progress| {
-        if !interactive {
-            return;
+    let is_gguf = model_kind_code(details.kind) == "gguf";
+    let variants = if is_gguf {
+        let variants_started = Instant::now();
+        if interactive {
+            eprintln!("🔎 Fetching GGUF variants from Hugging Face...");
         }
-        match progress {
-            ShowVariantsProgress::Inspecting { completed, total } => {
-                if total == 0 {
-                    return;
-                }
-                eprint!("\r   Inspecting variant sizes {completed}/{total}...");
-                let _ = std::io::stderr().flush();
-                if completed == total {
-                    eprintln!();
+        let variants = show_model_variants_with_progress(&details.exact_ref, |progress| {
+            if !interactive {
+                return;
+            }
+            match progress {
+                ShowVariantsProgress::Inspecting { completed, total } => {
+                    if total == 0 {
+                        return;
+                    }
+                    eprint!("\r   Inspecting variant sizes {completed}/{total}...");
+                    let _ = std::io::stderr().flush();
+                    if completed == total {
+                        eprintln!();
+                    }
                 }
             }
-        }
-    })
-    .await?;
-    if let Some(variants) = &variants {
-        if interactive {
+        })
+        .await?;
+        if let Some(variants) = &variants {
+            if interactive {
+                eprintln!(
+                    "✅ Fetched {} GGUF variants ({:.1}s)",
+                    variants.len(),
+                    variants_started.elapsed().as_secs_f32()
+                );
+            }
+        } else if interactive {
             eprintln!(
-                "✅ Fetched {} GGUF variants ({:.1}s)",
-                variants.len(),
+                "✅ No GGUF variants for this ref ({:.1}s)",
                 variants_started.elapsed().as_secs_f32()
             );
         }
+        variants
+    } else {
+        None
+    };
+    if let Some(variants) = &variants {
         if !variants.is_empty() && !json_output {
             println!();
             println!("Variants:");
@@ -533,11 +546,6 @@ pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
                 );
             }
         }
-    } else if interactive {
-        eprintln!(
-            "✅ No GGUF variants for this ref ({:.1}s)",
-            variants_started.elapsed().as_secs_f32()
-        );
     }
     if json_output {
         print_json(json!({
