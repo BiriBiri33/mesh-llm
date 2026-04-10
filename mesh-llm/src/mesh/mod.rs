@@ -4336,6 +4336,9 @@ impl Node {
         };
         let (notif_tx, notif_rx) = tokio::sync::watch::channel(empty_notif);
         tokio::spawn(async move {
+            // Keep the request stream's send half alive while subscribed so the
+            // remote side does not treat immediate EOF as an unsubscribe.
+            let _send = send;
             loop {
                 match read_len_prefixed(&mut recv).await {
                     Ok(buf) => match ConfigUpdateNotification::decode(buf.as_slice()) {
