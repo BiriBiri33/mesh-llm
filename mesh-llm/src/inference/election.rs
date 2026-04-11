@@ -2593,7 +2593,8 @@ mod tests {
             available_model_sizes: HashMap::new(),
             served_model_descriptors: vec![],
             served_model_runtime: vec![],
-            owner_id: None,
+            owner_attestation: None,
+            owner_summary: crate::crypto::OwnershipSummary::default(),
         }
     }
 
