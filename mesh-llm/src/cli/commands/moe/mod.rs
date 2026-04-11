@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -305,17 +305,21 @@ async fn run_share(model: &str, ranking_file: Option<&Path>, dataset_repo: &str)
     println!("☁️ Dataset contribution");
     println!("   repo: {dataset_repo}");
     println!("   prefix: {}", bundle.dataset_prefix);
-    if existing.len() == bundle.dataset_paths.len() {
-        println!("✅ Already published");
-        for path in existing {
-            println!("   existing: {path}");
+    match classify_share_prefix(&bundle.dataset_paths, &existing) {
+        SharePrefixState::AlreadyPublished(existing) => {
+            println!("✅ Already published");
+            for path in existing {
+                println!("   existing: {path}");
+            }
+            return Ok(());
         }
-        return Ok(());
-    } else if !existing.is_empty() {
-        return Err(share_error(
-            "Remote artifact prefix is partially populated",
-            &format!("{} already contains: {}", dataset_repo, existing.join(", ")),
-        ));
+        SharePrefixState::PartiallyPopulated(existing) => {
+            return Err(share_error(
+                "Remote artifact prefix is partially populated",
+                &format!("{} already contains: {}", dataset_repo, existing.join(", ")),
+            ));
+        }
+        SharePrefixState::New => {}
     }
 
     let token = models::hf_token_override().ok_or_else(|| {
@@ -430,6 +434,46 @@ fn ndjson_file_op(path_in_repo: &str, content: &[u8]) -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ndjson_header_uses_expected_shape() {
+        let value = ndjson_header("summary", "description");
+        assert_eq!(value["key"], "header");
+        assert_eq!(value["value"]["summary"], "summary");
+        assert_eq!(value["value"]["description"], "description");
+    }
+
+    #[test]
+    fn ndjson_file_op_uses_base64_payload() {
+        let value = ndjson_file_op("path/in/repo.txt", b"hello");
+        assert_eq!(value["key"], "file");
+        assert_eq!(value["value"]["path"], "path/in/repo.txt");
+        assert_eq!(value["value"]["encoding"], "base64");
+        assert_eq!(value["value"]["content"], "aGVsbG8=");
+    }
+
+    #[test]
+    fn classify_share_prefix_distinguishes_new_existing_and_partial() {
+        let all = vec![
+            "a/ranking.csv".to_string(),
+            "a/metadata.json".to_string(),
+            "a/run.log".to_string(),
+        ];
+        assert_eq!(classify_share_prefix(&all, &[]), SharePrefixState::New);
+        assert_eq!(
+            classify_share_prefix(&all, &all),
+            SharePrefixState::AlreadyPublished(all.clone())
+        );
+        assert_eq!(
+            classify_share_prefix(&all, &all[..1]),
+            SharePrefixState::PartiallyPopulated(vec!["a/ranking.csv".to_string()])
+        );
+    }
+}
+
 fn resolve_analyze_binary() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("Failed to determine own binary path")?;
     let bin_dir = exe
@@ -521,13 +565,15 @@ fn read_analyze_rows(path: &Path) -> Result<Vec<AnalyzeRow>> {
 
 struct SpinnerHandle {
     done: Arc<AtomicBool>,
+    message: Arc<Mutex<String>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl SpinnerHandle {
     fn set_message(&self, message: impl Into<String>) {
-        eprint!("\r⏳ {}\x1b[K", message.into());
-        let _ = std::io::Write::flush(&mut std::io::stderr());
+        if let Ok(mut guard) = self.message.lock() {
+            *guard = message.into();
+        }
     }
 
     fn finish_and_clear(mut self) {
@@ -543,12 +589,17 @@ impl SpinnerHandle {
 fn start_spinner(message: &str) -> SpinnerHandle {
     let done = Arc::new(AtomicBool::new(false));
     let done_thread = Arc::clone(&done);
-    let message = message.to_string();
+    let message = Arc::new(Mutex::new(message.to_string()));
+    let message_thread = Arc::clone(&message);
     let thread = thread::spawn(move || {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut index = 0usize;
         while !done_thread.load(Ordering::Relaxed) {
-            eprint!("\r{} {}\x1b[K", frames[index % frames.len()], message);
+            let current = message_thread
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_else(|_| "Working".to_string());
+            eprint!("\r{} {}\x1b[K", frames[index % frames.len()], current);
             let _ = std::io::Write::flush(&mut std::io::stderr());
             index += 1;
             thread::sleep(Duration::from_millis(120));
@@ -556,7 +607,25 @@ fn start_spinner(message: &str) -> SpinnerHandle {
     });
     SpinnerHandle {
         done,
+        message,
         thread: Some(thread),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SharePrefixState {
+    New,
+    AlreadyPublished(Vec<String>),
+    PartiallyPopulated(Vec<String>),
+}
+
+fn classify_share_prefix(dataset_paths: &[String], existing: &[String]) -> SharePrefixState {
+    if existing.len() == dataset_paths.len() {
+        SharePrefixState::AlreadyPublished(existing.to_vec())
+    } else if !existing.is_empty() {
+        SharePrefixState::PartiallyPopulated(existing.to_vec())
+    } else {
+        SharePrefixState::New
     }
 }
 

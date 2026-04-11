@@ -327,7 +327,10 @@ pub(crate) fn resolve_runtime_ranking(
         return Ok(local_legacy);
     };
 
-    if local_legacy.is_some() {
+    if local_legacy
+        .as_ref()
+        .is_some_and(|ranking| ranking_method_priority(ranking) >= 2)
+    {
         return Ok(local_legacy);
     }
 
@@ -336,6 +339,7 @@ pub(crate) fn resolve_runtime_ranking(
         &identity.repo_id,
         &identity.revision,
         &normalize_distribution_id(&identity.local_file_name),
+        false,
     ) {
         Ok(remote) => remote,
         Err(error) => return local_legacy.ok_or_else(|| error).map(Some),
@@ -418,12 +422,14 @@ async fn resolve_best_ranking(
     let remote_source_repo = source_repo.clone();
     let remote_source_revision = source_revision.clone();
     let remote_distribution_id = distribution_id.clone();
+    let remote_progress = args.progress;
     let remote_lookup = tokio::task::spawn_blocking(move || {
         fetch_remote_ranking(
             &remote_dataset_repo,
             &remote_source_repo,
             &remote_source_revision,
             &remote_distribution_id,
+            remote_progress,
         )
     })
     .await
@@ -479,8 +485,9 @@ fn fetch_remote_ranking(
     source_repo: &str,
     source_revision: &str,
     distribution_id: &str,
+    progress: bool,
 ) -> Result<Option<ResolvedRanking>> {
-    let api = build_hf_api(true).context("Build Hugging Face client for MoE ranking lookup")?;
+    let api = build_hf_api(progress).context("Build Hugging Face client for MoE ranking lookup")?;
     let dataset_repo = api.repo(Repo::with_revision(
         dataset_repo_name.to_string(),
         RepoType::Dataset,

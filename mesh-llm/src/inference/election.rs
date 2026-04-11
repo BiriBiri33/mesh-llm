@@ -625,7 +625,7 @@ fn resolve_runtime_moe_config(
                             );
                             (
                                 artifact.ranking,
-                                artifact.kind.label().to_string(),
+                                "micro-v1".to_string(),
                                 artifact.origin.label().to_string(),
                             )
                         }
@@ -657,7 +657,7 @@ fn resolve_runtime_moe_config(
             let artifact = ensure_full_analyze_ranking(bin_dir, model_name, model_path, &cached)?;
             (
                 artifact.ranking,
-                artifact.kind.label().to_string(),
+                "full-v1".to_string(),
                 artifact.origin.label().to_string(),
             )
         }
@@ -665,7 +665,7 @@ fn resolve_runtime_moe_config(
             let artifact = ensure_micro_analyze_ranking(bin_dir, model_name, model_path, options)?;
             (
                 artifact.ranking,
-                artifact.kind.label().to_string(),
+                "micro-v1".to_string(),
                 artifact.origin.label().to_string(),
             )
         }
