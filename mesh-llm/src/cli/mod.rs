@@ -411,8 +411,12 @@ pub(crate) enum Command {
         #[arg(long)]
         draft: bool,
     },
-    /// Update mesh-llm to the latest bundled release and exit.
-    Update,
+    /// Update mesh-llm to a bundled release and exit.
+    Update {
+        /// Install this specific release tag or version (e.g. v0.60.0 or 0.60.0-rc.1).
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Inspect local GPUs, stable IDs, and cached bandwidth.
     #[command(alias = "gpu")]
     Gpus {
