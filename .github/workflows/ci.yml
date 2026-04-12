@@ -95,6 +95,8 @@ jobs:
 
       # ── Rust ──
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -113,6 +115,17 @@ jobs:
         working-directory: mesh-llm
         run: cargo fmt -- --check
 
+      - name: Check embedded client dependency purity
+        run: |
+          cargo tree -p mesh-client --prefix=none --no-dedupe > /tmp/mesh-client-deps.txt
+          FORBIDDEN="keyring|rpassword|hf-hub|dirs|clap|include_dir|rmcp|keyring-core"
+          if grep -wE "^($FORBIDDEN)" /tmp/mesh-client-deps.txt; then
+            echo "ERROR: Forbidden dependency found in mesh-client"
+            grep -wE "^($FORBIDDEN)" /tmp/mesh-client-deps.txt
+            exit 1
+          fi
+          echo "PASS: No forbidden dependencies found"
+
       # Build in dev/debug profile, NOT release. Two reasons:
       #  1. Build + Unit tests steps share one target/ subdir and one
       #     incremental cache — zero duplicated codegen.
@@ -126,6 +139,11 @@ jobs:
 
       - name: Unit tests
         run: cargo test --lib --tests
+
+      - name: Protocol compatibility matrix
+        run: |
+          cargo test -p mesh-llm --test protocol_compat_v0_client
+          cargo test -p mesh-llm --test protocol_convert_matrix
 
       - name: Clippy
         working-directory: mesh-llm
@@ -293,9 +311,7 @@ jobs:
 
   swift_sdk_smoke:
     needs: [changes, inference_smoke_tests]
-    # Disabled until Swift SDK smoke execution has a runner. Apple artifact
-    # build/package work should move to Linux cross-build instead.
-    if: ${{ false }}
+    if: ${{ needs.inference_smoke_tests.result == 'success' && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true') }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -356,10 +372,8 @@ jobs:
 
   macos:
     needs: changes
-    # Despite the legacy job name, this lane cross-compiles Apple artifacts on
-    # Linux and does not require a macOS runner.
     if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' || needs.changes.outputs.benchmarks == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     outputs:
       benchmark_artifact_ready: ${{ steps.benchmark_gate.outputs.ready }}
     steps:
@@ -388,9 +402,6 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         working-directory: mesh-llm/ui
         run: npm ci && npm run build
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
 
       # ── Rust ──
       - uses: dtolnay/rust-toolchain@stable
@@ -443,7 +454,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF \
             -DLLAMA_OPENSSL=OFF \
             "${CACHE_FLAGS[@]}"
-          cmake --build llama.cpp/build --config Release -j$(nproc) --target rpc-server llama-server llama-moe-analyze llama-moe-split
+          cmake --build llama.cpp/build --config Release -j$(sysctl -n hw.ncpu) --target rpc-server llama-server llama-moe-analyze llama-moe-split
 
       # ── Download model ──
       - name: Cache model
