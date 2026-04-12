@@ -448,6 +448,12 @@ To update a bundle install to the latest release:
 mesh-llm update
 ```
 
+To install a specific bundled release tag:
+
+```bash
+mesh-llm update --version v0.X.Y
+```
+
 If you build from source, always use `just`:
 
 ```bash

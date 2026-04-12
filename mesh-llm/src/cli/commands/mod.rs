@@ -39,7 +39,7 @@ pub(crate) async fn dispatch(cli: &Cli) -> Result<bool> {
         Command::Download { name, draft } => {
             dispatch_download_command(name.as_deref(), *draft).await
         }
-        Command::Update => run_update(cli).await,
+        Command::Update { .. } => run_update(cli).await,
         Command::Gpus { json, command } => {
             dispatch_gpu_command(*json, command.as_ref())?;
             Ok(())

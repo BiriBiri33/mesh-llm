@@ -221,7 +221,7 @@ pub(crate) async fn run() -> Result<()> {
     let checked_updates = autoupdate::maybe_auto_update(&cli).await?;
 
     // Finish the release check before startup continues.
-    if !checked_updates && !matches!(cli.command, Some(Command::Update)) {
+    if !checked_updates && !matches!(cli.command, Some(Command::Update { .. })) {
         autoupdate::check_for_update().await;
     }
 

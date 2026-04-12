@@ -100,6 +100,35 @@ release version:
     git push origin main
     git push origin "$tag"
 
+# Tag and push a prerelease from the current branch. Bumps version, updates
+# Cargo.lock, commits, tags, and pushes the branch plus prerelease tag.
+prerelease version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    current_branch="$(git branch --show-current)"
+    if [[ -z "$current_branch" ]]; then
+        echo "Error: prerelease must be run from a branch, not detached HEAD." >&2
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Error: working tree is not clean. Commit or stash changes before prereleasing." >&2
+        exit 1
+    fi
+    tag="{{ version }}"
+    if [[ "$tag" != v* ]]; then
+        tag="v$tag"
+    fi
+    if [[ "$tag" != *-* ]]; then
+        echo "Error: prerelease tag must include a prerelease suffix such as -rc.1 (got: $tag)" >&2
+        exit 1
+    fi
+    scripts/release-version.sh "$tag"
+    git add -A
+    git commit -m "$tag: prerelease"
+    git tag "$tag"
+    git push origin "$current_branch"
+    git push origin "$tag"
+
 # Download the default model (GLM-4.7-Flash Q4_K_M, 17GB)
 download-model:
     #!/usr/bin/env bash
@@ -357,3 +386,62 @@ bench-prefix-affinity:
 # Show the diff from upstream llama.cpp
 diff:
     cd {{ llama_dir }} && git log --oneline master..upstream-latest
+
+# Build the client-only Docker image (no GPU, no llama.cpp)
+[unix]
+docker-build-client tag="mesh-llm:client":
+    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.client -t {{ tag }} .
+
+[windows]
+docker-build-client tag="mesh-llm:client":
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:DOCKER_BUILDKIT='1'; docker build -f docker/Dockerfile.client -t '{{ tag }}' ."
+
+# Build the CPU full-node Docker image
+[unix]
+docker-build-cpu tag="mesh-llm:cpu":
+    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.cpu -t {{ tag }} .
+
+[windows]
+docker-build-cpu tag="mesh-llm:cpu":
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:DOCKER_BUILDKIT='1'; docker build -f docker/Dockerfile.cpu -t '{{ tag }}' ."
+
+# Build the CUDA full-node Docker image
+[unix]
+docker-build-cuda tag="mesh-llm:cuda" cuda_arch="75;80;86;89;90;120":
+    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.cuda \
+        --build-arg CUDA_ARCH="{{ cuda_arch }}" \
+        -t {{ tag }} .
+
+[windows]
+docker-build-cuda tag="mesh-llm:cuda" cuda_arch="75;80;86;89;90;120":
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:DOCKER_BUILDKIT='1'; docker build -f docker/Dockerfile.cuda --build-arg CUDA_ARCH='{{ cuda_arch }}' -t '{{ tag }}' ."
+
+# Build the ROCm full-node Docker image
+[unix]
+docker-build-rocm tag="mesh-llm:rocm" rocm_arch="gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201":
+    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm \
+        --build-arg ROCM_ARCH="{{ rocm_arch }}" \
+        -t {{ tag }} .
+
+[windows]
+docker-build-rocm tag="mesh-llm:rocm" rocm_arch="gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201":
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:DOCKER_BUILDKIT='1'; docker build -f docker/Dockerfile.rocm --build-arg ROCM_ARCH='{{ rocm_arch }}' -t '{{ tag }}' ."
+
+# Build the Vulkan full-node Docker image
+[unix]
+docker-build-vulkan tag="mesh-llm:vulkan":
+    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.vulkan -t {{ tag }} .
+
+[windows]
+docker-build-vulkan tag="mesh-llm:vulkan":
+    @powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:DOCKER_BUILDKIT='1'; docker build -f docker/Dockerfile.vulkan -t '{{ tag }}' ."
+
+# Run the client console image locally
+docker-run-client tag="mesh-llm:client":
+    docker run --rm -p 3131:3131 -p 9337:9337 -e APP_MODE=console {{ tag }}
+
+# Run a CPU worker node locally (requires model volume mount)
+docker-run-cpu models=(home_dir / ".models") tag="mesh-llm:cpu":
+    docker run --rm -p 9337:9337 \
+        -v {{ models }}:/root/.models \
+        -e APP_MODE=worker {{ tag }}

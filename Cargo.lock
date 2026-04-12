@@ -2862,7 +2862,7 @@ version = "0.1.0"
 
 [[package]]
 name = "mesh-llm"
-version = "0.59.0"
+version = "0.60.0-rc.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2895,6 +2895,7 @@ dependencies = [
  "rpassword",
  "rustls",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "serial_test",
@@ -2915,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-plugin"
-version = "0.59.0"
+version = "0.60.0-rc.2"
 dependencies = [
  "anyhow",
  "async-trait",

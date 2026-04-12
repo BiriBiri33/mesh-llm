@@ -12,6 +12,12 @@ Install the latest release bundle:
 curl -fsSL https://raw.githubusercontent.com/michaelneale/mesh-llm/main/install.sh | bash
 ```
 
+To opt into the latest published prerelease bundle instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelneale/mesh-llm/main/install.sh | bash -s -- --pre-release
+```
+
 The installer probes your machine, recommends a flavor, and asks what to install.
 
 For a non-interactive install, set the flavor explicitly:
