@@ -36,6 +36,7 @@ pub(crate) async fn submit_full_analyze_job(
         release_target: options.hf_job_release_target,
         source_repo: identity.repo_id.clone(),
         source_revision: identity.revision.clone(),
+        source_file: identity.file.clone(),
         distribution_id: crate::system::moe_planner::normalize_distribution_id(
             &identity.local_file_name,
         ),
@@ -69,6 +70,7 @@ pub(crate) async fn submit_micro_analyze_job(
         release_target: options.hf_job_release_target,
         source_repo: identity.repo_id.clone(),
         source_revision: identity.revision.clone(),
+        source_file: identity.file.clone(),
         distribution_id: crate::system::moe_planner::normalize_distribution_id(
             &identity.local_file_name,
         ),
@@ -89,6 +91,7 @@ struct JobSubmissionSpec {
     release_target: HfJobReleaseTarget,
     source_repo: String,
     source_revision: String,
+    source_file: String,
     distribution_id: String,
 }
 
@@ -232,6 +235,9 @@ async fn submit_job(spec: JobSubmissionSpec) -> Result<()> {
         "environment": {
             "MESH_LLM_RELEASE_URL": release_url,
             "MODEL_REF": spec.model_ref,
+            "SOURCE_REPO": spec.source_repo,
+            "SOURCE_REVISION": spec.source_revision,
+            "SOURCE_FILE": spec.source_file,
             "DATASET_REPO": spec.dataset_repo,
             "HF_JOB_FLAVOR": pricing.flavor.name,
             "HF_JOB_FLAVOR_PRETTY": pricing.flavor.pretty_name(),
