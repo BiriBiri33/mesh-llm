@@ -3,11 +3,12 @@ mod formatters_console;
 mod formatters_json;
 
 use crate::cli::models::ModelsCommand;
-use crate::cli::terminal_progress::{clear_stderr_line, start_spinner, DeterminateProgressLine};
+use crate::cli::terminal_progress::{clear_stderr_line, DeterminateProgressLine};
 use crate::models::{
-    catalog, download_exact_ref, find_catalog_model_exact, installed_model_capabilities,
-    scan_installed_models, search_catalog_models, search_huggingface, show_exact_model,
-    show_model_variants_with_progress, SearchArtifactFilter, SearchProgress, ShowVariantsProgress,
+    catalog, download_model_ref_with_progress_details, find_catalog_model_exact,
+    installed_model_capabilities, scan_installed_models, search_catalog_models, search_huggingface,
+    show_exact_model, show_model_variants_with_progress, SearchArtifactFilter, SearchProgress,
+    ShowVariantsProgress,
 };
 use anyhow::{anyhow, Result};
 use std::io::IsTerminal;
@@ -193,19 +194,7 @@ pub async fn run_model_download(
     json_output: bool,
 ) -> Result<()> {
     let formatter = models_formatter(json_output);
-    let details = if json_output {
-        show_exact_model(model_ref).await.ok()
-    } else {
-        let mut spinner = start_spinner(&format!("Resolving {model_ref}"));
-        let details = show_exact_model(model_ref).await.ok();
-        spinner.finish();
-        details
-    };
-    let download_ref = details
-        .as_ref()
-        .map(|d| d.download_url.as_str())
-        .unwrap_or(model_ref);
-    let path = download_exact_ref(download_ref).await?;
+    let (path, details) = download_model_ref_with_progress_details(model_ref, !json_output).await?;
     if !include_draft {
         return formatter.render_download(model_ref, &path, details.as_ref(), false, None);
     }
@@ -257,10 +246,18 @@ pub async fn dispatch_models_command(command: &ModelsCommand) -> Result<()> {
             check,
             json,
         } => {
-            crate::models::run_update(repo.as_deref(), *all, *check)?;
+            let repo_for_update = repo.clone();
+            let repo_for_render = repo.clone();
+            let all = *all;
+            let check = *check;
+            tokio::task::spawn_blocking(move || {
+                crate::models::run_update(repo_for_update.as_deref(), all, check)
+            })
+            .await
+            .map_err(anyhow::Error::from)??;
             if *json {
                 let formatter = models_formatter(*json);
-                formatter.render_updates_status(repo.as_deref(), *all, *check)?;
+                formatter.render_updates_status(repo_for_render.as_deref(), all, check)?;
             }
         }
     }

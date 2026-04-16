@@ -1,6 +1,7 @@
 use super::local::HuggingFaceModelIdentity;
 use super::ModelCapabilities;
 use super::{capabilities, catalog, find_model_path, format_size_bytes};
+use crate::cli::terminal_progress::start_spinner;
 use anyhow::{anyhow, bail, Context, Result};
 use hf_hub::{ListModelsParams, RepoInfo, RepoInfoParams};
 use std::cmp::Ordering;
@@ -66,8 +67,24 @@ pub fn find_catalog_model_exact(query: &str) -> Option<&'static catalog::Catalog
     })
 }
 
-pub async fn download_exact_ref(input: &str) -> Result<PathBuf> {
-    download_exact_ref_with_progress(input, true).await
+pub async fn download_model_ref_with_progress_details(
+    input: &str,
+    progress: bool,
+) -> Result<(PathBuf, Option<ModelDetails>)> {
+    let details = if progress {
+        let mut spinner = start_spinner(&format!("Resolving {input}"));
+        let details = show_exact_model(input).await.ok();
+        spinner.finish();
+        details
+    } else {
+        show_exact_model(input).await.ok()
+    };
+    let download_ref = details
+        .as_ref()
+        .map(|detail| detail.download_url.as_str())
+        .unwrap_or(input);
+    let path = download_exact_ref_with_progress(download_ref, progress).await?;
+    Ok((path, details))
 }
 
 pub async fn download_exact_ref_with_progress(input: &str, progress: bool) -> Result<PathBuf> {
@@ -145,9 +162,10 @@ pub async fn resolve_model_spec_with_progress(input: &Path, progress: bool) -> R
         );
     }
 
-    download_exact_ref_with_progress(&raw, progress)
+    let (path, _) = download_model_ref_with_progress_details(&raw, progress)
         .await
-        .with_context(|| format!("Resolve model spec {raw}"))
+        .with_context(|| format!("Resolve model spec {raw}"))?;
+    Ok(path)
 }
 
 pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
