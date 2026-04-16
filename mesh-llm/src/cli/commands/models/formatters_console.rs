@@ -1,8 +1,8 @@
 use super::formatters::{
     catalog_model_capabilities, display_width, filter_label, fit_hint_for_size_label, format_count,
-    format_installed_size, format_source_label, huggingface_cache_dir, installed_model_kind,
-    model_kind_code, pad_left_display, pad_right_display, sort_label, variant_selector_label,
-    ConsoleFormatter, InstalledRow, ModelsFormatter, SearchFormatter,
+    format_installed_size, format_source_label, huggingface_cache_dir, huggingface_repo_url,
+    installed_model_kind, model_kind_code, pad_left_display, pad_right_display, sort_label,
+    variant_selector_label, ConsoleFormatter, InstalledRow, ModelsFormatter, SearchFormatter,
 };
 use crate::models::{catalog, ModelDetails, SearchArtifactFilter, SearchHit, SearchSort};
 use anyhow::Result;
@@ -120,6 +120,7 @@ impl SearchFormatter for ConsoleFormatter {
                 caps.push(format!("🛠️ tool use ({label})"));
             }
             println!("   capabilities: {}", caps.join("  "));
+            println!("   repo: {}", huggingface_repo_url(&result.repo_id));
             println!("   ref: {}", result.exact_ref);
             println!("   show: mesh-llm models show {}", result.exact_ref);
             println!("   download: mesh-llm models download {}", result.exact_ref);

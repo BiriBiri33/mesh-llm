@@ -126,6 +126,10 @@ pub(crate) fn print_json(value: Value) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn huggingface_repo_url(repo_id: &str) -> String {
+    format!("https://huggingface.co/{repo_id}")
+}
+
 pub(crate) fn format_installed_size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{:.1}GB", bytes as f64 / 1e9)

@@ -1,8 +1,8 @@
 use super::formatters::{
     capabilities_json, catalog_model_capabilities, catalog_model_kind_code, filter_name,
-    fit_code_for_size_label, huggingface_cache_dir, installed_model_kind_code, local_capacity_json,
-    model_kind_code, moe_json, print_json, sort_name, InstalledRow, JsonFormatter, ModelsFormatter,
-    SearchFormatter,
+    fit_code_for_size_label, huggingface_cache_dir, huggingface_repo_url,
+    installed_model_kind_code, local_capacity_json, model_kind_code, moe_json, print_json,
+    sort_name, InstalledRow, JsonFormatter, ModelsFormatter, SearchFormatter,
 };
 use crate::models::{catalog, ModelDetails, SearchArtifactFilter, SearchHit, SearchSort};
 use anyhow::Result;
@@ -95,6 +95,7 @@ impl SearchFormatter for JsonFormatter {
             .map(|result| {
                 json!({
                     "repo_id": result.repo_id,
+                    "repo_url": huggingface_repo_url(&result.repo_id),
                     "type": model_kind_code(result.kind),
                     "size": result.size_label,
                     "downloads": result.downloads,
