@@ -183,9 +183,9 @@ impl ModelsFormatter for ConsoleFormatter {
                 caps.push(format!("🛠️ tool use ({label})"));
             }
             println!("   capabilities: {}", caps.join("  "));
-            println!("   ref: {}", row.name);
-            println!("   show: mesh-llm models show {}", row.name);
-            println!("   download: mesh-llm models download {}", row.name);
+            println!("   ref: {}", row.model_ref);
+            println!("   show: mesh-llm models show {}", row.model_ref);
+            println!("   download: mesh-llm models download {}", row.model_ref);
             println!("   path: {}", row.path.display());
             if let Some(model) = row.catalog_model {
                 println!("   about: {}", model.description);

@@ -109,11 +109,28 @@ pub fn run_model_installed(json_output: bool) -> Result<()> {
         .into_iter()
         .map(|name| {
             let path = crate::models::find_model_path(&name);
-            let size = std::fs::metadata(&path).map(|meta| meta.len()).ok();
+            let display_name = crate::models::installed_model_display_name(&name);
             let catalog_model = find_catalog_model_exact(&name);
+            let model_ref = if let Some(model) = catalog_model {
+                model.name.clone()
+            } else if let Some(identity) = crate::models::huggingface_identity_for_path(&path) {
+                format!("{}/{}", identity.repo_id, identity.file)
+            } else {
+                name.clone()
+            };
+            let size = if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            {
+                Some(crate::inference::election::total_model_bytes(&path))
+            } else {
+                std::fs::metadata(&path).map(|meta| meta.len()).ok()
+            };
             let capabilities = installed_model_capabilities(&name);
             InstalledRow {
-                name,
+                name: display_name,
+                model_ref,
                 path,
                 size,
                 catalog_model,

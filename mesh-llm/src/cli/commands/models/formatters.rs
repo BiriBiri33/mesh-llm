@@ -30,6 +30,7 @@ pub(crate) trait SearchFormatter {
 #[derive(Clone)]
 pub(crate) struct InstalledRow {
     pub(crate) name: String,
+    pub(crate) model_ref: String,
     pub(crate) path: PathBuf,
     pub(crate) size: Option<u64>,
     pub(crate) catalog_model: Option<&'static catalog::CatalogModel>,

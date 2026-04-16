@@ -36,12 +36,16 @@ pub fn huggingface_hub_cache() -> PathBuf {
                 return PathBuf::from(trimmed).join("hub");
             }
         }
-        dirs::cache_dir()
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".cache")
-            })
+        if let Ok(path) = std::env::var("XDG_CACHE_HOME") {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed).join("huggingface").join("hub");
+            }
+        }
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(".cache")
             .join("huggingface")
             .join("hub")
     }
