@@ -586,6 +586,14 @@ mod tests {
             ),
             "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q3_K_S"
         );
+        assert_eq!(
+            display_exact_ref(
+                "QuantFactory/Meta-Llama-3.1-8B-Instruct-GGUF",
+                RepoArtifactKind::Gguf,
+                "Meta-Llama-3.1-8B-Instruct.Q4_K_M.gguf"
+            ),
+            "QuantFactory/Meta-Llama-3.1-8B-Instruct-GGUF:Q4_K_M"
+        );
     }
 
     #[test]

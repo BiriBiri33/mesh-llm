@@ -498,23 +498,10 @@ pub(super) fn quant_selector_from_gguf_file(file: &str) -> Option<String> {
         }
     }
 
-    if let Some(pos) = stem.rfind("-UD-") {
-        return Some(stem[pos + 1..].to_string());
-    }
-    if let Some(pos) = stem.rfind("-IQ") {
-        return Some(stem[pos + 1..].to_string());
-    }
-    if let Some(pos) = stem.rfind("-Q") {
-        return Some(stem[pos + 1..].to_string());
-    }
-    if let Some(pos) = stem.rfind("-BF16") {
-        return Some(stem[pos + 1..].to_string());
-    }
-    if let Some(pos) = stem.rfind("-F16") {
-        return Some(stem[pos + 1..].to_string());
-    }
-    if let Some(pos) = stem.rfind("-F32") {
-        return Some(stem[pos + 1..].to_string());
+    for marker in ["-UD-", ".UD-", "-IQ", ".IQ", "-Q", ".Q", "-BF16", ".BF16", "-F16", ".F16", "-F32", ".F32"] {
+        if let Some(pos) = stem.rfind(marker) {
+            return Some(stem[pos + 1..].to_string());
+        }
     }
     None
 }

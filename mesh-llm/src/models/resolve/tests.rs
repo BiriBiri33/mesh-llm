@@ -378,6 +378,10 @@ fn quant_selector_from_gguf_file_extracts_expected_forms() {
         Some("UD-Q4_K_XL".to_string())
     );
     assert_eq!(
+        quant_selector_from_gguf_file("Meta-Llama-3.1-8B-Instruct.Q4_K_M.gguf"),
+        Some("Q4_K_M".to_string())
+    );
+    assert_eq!(
         quant_selector_from_gguf_file("BF16/gemma-4-31B-it-BF16-00001-of-00002.gguf"),
         Some("BF16".to_string())
     );
@@ -396,6 +400,14 @@ fn format_huggingface_display_ref_prefers_selector_form_for_gguf() {
             "gemma-4-31B-it-UD-Q4_K_XL.gguf"
         ),
         "unsloth/gemma-4-31B-it-GGUF:UD-Q4_K_XL"
+    );
+    assert_eq!(
+        format_huggingface_display_ref(
+            "QuantFactory/Meta-Llama-3.1-8B-Instruct-GGUF",
+            None,
+            "Meta-Llama-3.1-8B-Instruct.Q4_K_M.gguf"
+        ),
+        "QuantFactory/Meta-Llama-3.1-8B-Instruct-GGUF:Q4_K_M"
     );
 }
 
