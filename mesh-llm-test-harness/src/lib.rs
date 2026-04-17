@@ -46,7 +46,7 @@ impl FixtureMesh {
 
 impl Drop for FixtureMesh {
     fn drop(&mut self) {
-        // Send SIGTERM, wait up to 5s, then SIGKILL
+        // Forcefully terminate the child process, then wait up to 5s for it to exit.
         let _ = self.child.kill();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
