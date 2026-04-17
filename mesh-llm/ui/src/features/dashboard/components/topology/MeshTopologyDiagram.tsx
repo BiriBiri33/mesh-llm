@@ -9,6 +9,11 @@ import {
 } from "react";
 import { Minus, Plus, RotateCcw } from "lucide-react";
 
+import {
+  useResolvedTheme,
+  type ResolvedTheme,
+  type ThemeMode,
+} from "../../../../lib/resolved-theme";
 import { cn } from "../../../../lib/utils";
 import {
   formatLatency,
@@ -19,6 +24,47 @@ import { EmptyPanel } from "../details";
 
 type TopologyStatusPayload = {
   model_name?: string | null;
+};
+
+type TopologyThemeMode = ThemeMode;
+
+type NodePalette = {
+  fill: string;
+  fillAlpha: number;
+  line: string;
+  lineAlpha: number;
+};
+
+type ScenePalette = {
+  shellClassName: string;
+  chromeClassName: string;
+  selectedModelClassName: string;
+  tooltipClassName: string;
+  tooltipSubtleTextClassName: string;
+  tooltipMutedTextClassName: string;
+  tooltipDividerClassName: string;
+  selfLabelPrimaryClassName: string;
+  selfLabelSecondaryClassName: string;
+  selfLabelTextShadow: string;
+  surfaceGradient: (focalPoint: string) => string;
+  nebulaBlendClassName: string;
+  nebulaOpacity: number;
+  nebulaGradient: string;
+  gridOpacity: number;
+  gridLineColor: string;
+  selfHaloGradient: string;
+  additiveBlend: boolean;
+  lineTailAlpha: number;
+  nodes: {
+    client: NodePalette;
+    worker: NodePalette;
+    active: NodePalette;
+    serving: NodePalette;
+    self: NodePalette & {
+      selectedLine: string;
+      selectedLineAlpha: number;
+    };
+  };
 };
 
 type RenderNode = {
@@ -99,6 +145,108 @@ function color(hex: string, alpha = 1): [number, number, number, number] {
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
+
+const SCENE_PALETTES: Record<ResolvedTheme, ScenePalette> = {
+  dark: {
+    shellClassName:
+      "border-white/10 bg-[#06111f] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_20px_60px_rgba(0,0,0,0.28)]",
+    chromeClassName: "border-white/10 bg-slate-950/72 text-slate-100 hover:bg-slate-900/80",
+    selectedModelClassName:
+      "border-amber-300/20 bg-amber-300/10 text-amber-100/90",
+    tooltipClassName:
+      "border-white/10 bg-slate-950/88 text-white shadow-2xl shadow-black/50",
+    tooltipSubtleTextClassName: "text-slate-300",
+    tooltipMutedTextClassName: "text-slate-500",
+    tooltipDividerClassName: "border-white/10 text-slate-400",
+    selfLabelPrimaryClassName: "text-white",
+    selfLabelSecondaryClassName: "text-slate-200",
+    selfLabelTextShadow: "0 1px 10px rgba(0,0,0,0.72)",
+    surfaceGradient: (focalPoint) => `
+      radial-gradient(circle at ${focalPoint}, rgba(59,130,246,0.12), transparent 22%),
+      radial-gradient(circle at 72% 34%, rgba(250,204,21,0.10), transparent 26%),
+      radial-gradient(circle at 30% 58%, rgba(56,189,248,0.08), transparent 32%),
+      radial-gradient(circle at ${focalPoint}, rgba(255,255,255,0.035) 0, transparent 38%),
+      linear-gradient(180deg, rgba(12,24,40,0.98), rgba(6,17,31,1))
+    `,
+    nebulaBlendClassName: "mix-blend-screen",
+    nebulaOpacity: 0.48,
+    nebulaGradient: `
+      radial-gradient(40% 28% at 28% 60%, rgba(56,189,248,0.11), transparent 72%),
+      radial-gradient(34% 26% at 72% 32%, rgba(250,204,21,0.1), transparent 74%),
+      radial-gradient(46% 32% at 50% 54%, rgba(99,102,241,0.08), transparent 78%)
+    `,
+    gridOpacity: 0.1,
+    gridLineColor: "rgba(255,255,255,0.04)",
+    selfHaloGradient:
+      "radial-gradient(circle, rgba(255,255,255,0.18) 0%, rgba(192,132,252,0.14) 18%, rgba(59,130,246,0.08) 42%, transparent 72%)",
+    additiveBlend: true,
+    lineTailAlpha: 0.02,
+    nodes: {
+      client: { fill: "#94a3b8", fillAlpha: 0.84, line: "#7c8ba1", lineAlpha: 0 },
+      worker: { fill: "#7dd3fc", fillAlpha: 0.96, line: "#38bdf8", lineAlpha: 0 },
+      active: { fill: "#4ade80", fillAlpha: 0.95, line: "#4ade80", lineAlpha: 0 },
+      serving: { fill: "#f8fafc", fillAlpha: 1, line: "#facc15", lineAlpha: 0.22 },
+      self: {
+        fill: "#c084fc",
+        fillAlpha: 1,
+        line: "#c084fc",
+        lineAlpha: 0.16,
+        selectedLine: "#facc15",
+        selectedLineAlpha: 0.34,
+      },
+    },
+  },
+  light: {
+    shellClassName:
+      "border-slate-200/80 bg-slate-50/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.96),0_18px_40px_rgba(148,163,184,0.18)]",
+    chromeClassName:
+      "border-slate-200/85 bg-white/84 text-slate-700 shadow-sm shadow-slate-200/80 hover:bg-white",
+    selectedModelClassName:
+      "border-amber-300/70 bg-amber-100/92 text-amber-900",
+    tooltipClassName:
+      "border-slate-200/90 bg-white/92 text-slate-900 shadow-2xl shadow-slate-200/80",
+    tooltipSubtleTextClassName: "text-slate-600",
+    tooltipMutedTextClassName: "text-slate-500",
+    tooltipDividerClassName: "border-slate-200/90 text-slate-500",
+    selfLabelPrimaryClassName: "text-slate-900",
+    selfLabelSecondaryClassName: "text-slate-600",
+    selfLabelTextShadow: "0 1px 10px rgba(255,255,255,0.92)",
+    surfaceGradient: (focalPoint) => `
+      radial-gradient(circle at ${focalPoint}, rgba(59,130,246,0.08), transparent 24%),
+      radial-gradient(circle at 72% 34%, rgba(245,158,11,0.11), transparent 24%),
+      radial-gradient(circle at 30% 58%, rgba(14,165,233,0.07), transparent 31%),
+      radial-gradient(circle at ${focalPoint}, rgba(255,255,255,0.58) 0, transparent 34%),
+      linear-gradient(180deg, rgba(248,250,252,0.98), rgba(241,245,249,1))
+    `,
+    nebulaBlendClassName: "mix-blend-multiply",
+    nebulaOpacity: 0.22,
+    nebulaGradient: `
+      radial-gradient(42% 30% at 28% 60%, rgba(14,165,233,0.08), transparent 72%),
+      radial-gradient(34% 26% at 72% 32%, rgba(245,158,11,0.09), transparent 74%),
+      radial-gradient(46% 32% at 50% 54%, rgba(124,58,237,0.05), transparent 78%)
+    `,
+    gridOpacity: 0.22,
+    gridLineColor: "rgba(51,65,85,0.08)",
+    selfHaloGradient:
+      "radial-gradient(circle, rgba(255,255,255,0.88) 0%, rgba(196,181,253,0.38) 20%, rgba(125,211,252,0.18) 44%, transparent 74%)",
+    additiveBlend: false,
+    lineTailAlpha: 0.05,
+    nodes: {
+      client: { fill: "#64748b", fillAlpha: 0.5, line: "#64748b", lineAlpha: 0 },
+      worker: { fill: "#0284c7", fillAlpha: 0.72, line: "#0284c7", lineAlpha: 0 },
+      active: { fill: "#16a34a", fillAlpha: 0.74, line: "#16a34a", lineAlpha: 0 },
+      serving: { fill: "#0f172a", fillAlpha: 0.9, line: "#f59e0b", lineAlpha: 0.18 },
+      self: {
+        fill: "#7c3aed",
+        fillAlpha: 0.96,
+        line: "#8b5cf6",
+        lineAlpha: 0.12,
+        selectedLine: "#f59e0b",
+        selectedLineAlpha: 0.24,
+      },
+    },
+  },
+};
 
 function distributePerimeterClients(nodes: TopologyNode[]) {
   const placed: Array<{ x: number; y: number }> = [];
@@ -343,7 +491,12 @@ function createDebugNode(
   };
 }
 
-function useRadarFieldNodes(nodes: TopologyNode[], selectedModel: string, fallbackModel: string) {
+function useRadarFieldNodes(
+  nodes: TopologyNode[],
+  selectedModel: string,
+  fallbackModel: string,
+  palette: ScenePalette["nodes"],
+) {
   return useMemo<RenderNode[]>(() => {
     if (!nodes.length) return [];
 
@@ -442,8 +595,8 @@ function useRadarFieldNodes(nodes: TopologyNode[], selectedModel: string, fallba
         x,
         y,
         size: nodeSize(node, 1.5),
-        color: color("#94a3b8", 0.84),
-        lineColor: color("#7c8ba1", 0),
+        color: color(palette.client.fill, palette.client.fillAlpha),
+        lineColor: color(palette.client.line, palette.client.lineAlpha),
         pulse: 0.28 + hashString(`${node.id}:pulse`) * 0.24,
         selectedModelMatch: false,
         z: 1,
@@ -472,8 +625,8 @@ function useRadarFieldNodes(nodes: TopologyNode[], selectedModel: string, fallba
         x,
         y,
         size: nodeSize(node, 3),
-        color: color("#7dd3fc", glowAlpha),
-        lineColor: color("#38bdf8", 0),
+        color: color(palette.worker.fill, Math.min(glowAlpha, palette.worker.fillAlpha)),
+        lineColor: color(palette.worker.line, palette.worker.lineAlpha),
         pulse: 0.42 + (1 - latencyNorm) * 0.34 + hashString(`${node.id}:pulse`) * 0.36,
         selectedModelMatch: false,
         z: 2,
@@ -502,8 +655,8 @@ function useRadarFieldNodes(nodes: TopologyNode[], selectedModel: string, fallba
         x,
         y,
         size: nodeSize(node, 5),
-        color: color("#4ade80", glowAlpha),
-        lineColor: color("#4ade80", 0),
+        color: color(palette.active.fill, Math.min(glowAlpha, palette.active.fillAlpha)),
+        lineColor: color(palette.active.line, palette.active.lineAlpha),
         pulse: 0.68 + (1 - latencyNorm) * 0.4 + hashString(`${node.id}:pulse`) * 0.34,
         selectedModelMatch: false,
         z: 3,
@@ -532,8 +685,8 @@ function useRadarFieldNodes(nodes: TopologyNode[], selectedModel: string, fallba
         x,
         y,
         size: nodeSize(node, 9),
-        color: color("#f8fafc", glowAlpha),
-        lineColor: color("#facc15", 0.22),
+        color: color(palette.serving.fill, Math.min(glowAlpha, palette.serving.fillAlpha)),
+        lineColor: color(palette.serving.line, palette.serving.lineAlpha),
         pulse: 1.02 + (1 - latencyNorm) * 0.46 + hashString(`${node.id}:pulse`) * 0.28,
         selectedModelMatch: true,
         z: 4,
@@ -568,11 +721,11 @@ function useRadarFieldNodes(nodes: TopologyNode[], selectedModel: string, fallba
       x: 0.5,
       y: 0.52,
       size: nodeSize(selfNode, 15),
-      color: color("#c084fc", 1),
+      color: color(palette.self.fill, palette.self.fillAlpha),
       lineColor:
         focusModel && selfNode.servingModels.includes(focusModel)
-          ? color("#facc15", 0.34)
-          : color("#c084fc", 0.16),
+          ? color(palette.self.selectedLine, palette.self.selectedLineAlpha)
+          : color(palette.self.line, palette.self.lineAlpha),
       pulse: 1.4,
       selectedModelMatch:
         !!focusModel && selfNode.servingModels.some((model) => model === focusModel),
@@ -583,7 +736,7 @@ function useRadarFieldNodes(nodes: TopologyNode[], selectedModel: string, fallba
     resolvedOutput.push(selfRenderNode);
 
     return resolvedOutput.sort((left, right) => left.z - right.z || left.size - right.size);
-  }, [fallbackModel, nodes, selectedModel]);
+  }, [fallbackModel, nodes, palette, selectedModel]);
 }
 
 function createShader(
@@ -630,15 +783,6 @@ function createProgram(
 
 function easeOutCubic(value: number) {
   return 1 - Math.pow(1 - value, 3);
-}
-
-function lerp(start: number, end: number, t: number) {
-  return start + (end - start) * t;
-}
-
-function quadraticBezier(start: number, control: number, end: number, t: number) {
-  const inv = 1 - t;
-  return inv * inv * start + 2 * inv * t * control + t * t * end;
 }
 
 function cubicBezier(
@@ -804,7 +948,7 @@ export function MeshTopologyDiagram({
   status: TopologyStatusPayload | null;
   nodes: TopologyNode[];
   selectedModel: string;
-  themeMode: "light" | "dark" | "auto";
+  themeMode: TopologyThemeMode;
   onOpenNode?: (nodeId: string) => void;
   highlightedNodeId?: string;
   fullscreen?: boolean;
@@ -837,7 +981,7 @@ function MeshRadarField({
   status,
   nodes,
   selectedModel,
-  themeMode: _themeMode,
+  themeMode,
   onOpenNode,
   highlightedNodeId,
   fullscreen,
@@ -847,7 +991,7 @@ function MeshRadarField({
   status: TopologyStatusPayload;
   nodes: TopologyNode[];
   selectedModel: string;
-  themeMode: "light" | "dark" | "auto";
+  themeMode: TopologyThemeMode;
   onOpenNode?: (nodeId: string) => void;
   highlightedNodeId?: string;
   fullscreen: boolean;
@@ -875,6 +1019,8 @@ function MeshRadarField({
   const selectedNodeIdRef = useRef(selectedNodeId);
   const hoveredNodeIdRef = useRef<string | null>(null);
   const debugNodeCounterRef = useRef(0);
+  const resolvedTheme = useResolvedTheme(themeMode);
+  const scene = useMemo(() => SCENE_PALETTES[resolvedTheme], [resolvedTheme]);
   const selfNode = useMemo(() => nodes.find((node) => node.self) ?? nodes[0], [nodes]);
   const [tooltipStyle, setTooltipStyle] = useState<CSSProperties | null>(null);
   const [hostSize, setHostSize] = useState({ width: 0, height: 0 });
@@ -888,6 +1034,7 @@ function MeshRadarField({
     displayNodes,
     selectedModel,
     status.model_name ?? "",
+    scene.nodes,
   );
   const dragRef = useRef<{
     active: boolean;
@@ -1267,7 +1414,7 @@ function MeshRadarField({
             node.lineColor[0],
             node.lineColor[1],
             node.lineColor[2],
-            0.02,
+            scene.lineTailAlpha,
           );
         }
       }
@@ -1335,7 +1482,11 @@ function MeshRadarField({
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      if (scene.additiveBlend) {
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      } else {
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      }
 
       if (linePositions.length > 0) {
         gl.useProgram(lineProgram);
@@ -1408,7 +1559,7 @@ function MeshRadarField({
       gl.deleteProgram(pointProgram);
       gl.deleteProgram(lineProgram);
     };
-  }, [renderNodes, selfNode?.id, status.model_name]);
+  }, [renderNodes, scene, selfNode?.id, status.model_name]);
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragRef.current.active) {
@@ -1553,7 +1704,7 @@ function MeshRadarField({
       ref={hostRef}
       className={cn(
         "relative overflow-hidden rounded-[20px] border",
-        "border-white/10 bg-[#06111f] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_20px_60px_rgba(0,0,0,0.28)]",
+        scene.shellClassName,
         heightClass ?? "h-[360px] md:h-[420px] lg:h-[460px] xl:h-[520px]",
         onOpenNode ? "cursor-crosshair" : undefined,
       )}
@@ -1566,37 +1717,31 @@ function MeshRadarField({
       onWheel={handleWheel}
     >
       <div
-        className="pointer-events-none absolute inset-0 opacity-95"
+        className="pointer-events-none absolute inset-0"
         style={{
-          background: `
-            radial-gradient(circle at ${focalPoint}, rgba(59,130,246,0.12), transparent 22%),
-            radial-gradient(circle at 72% 34%, rgba(250,204,21,0.10), transparent 26%),
-            radial-gradient(circle at 30% 58%, rgba(56,189,248,0.08), transparent 32%),
-            radial-gradient(circle at ${focalPoint}, rgba(255,255,255,0.035) 0, transparent 38%),
-            linear-gradient(180deg, rgba(12,24,40,0.98), rgba(6,17,31,1))
-          `,
+          background: scene.surfaceGradient(focalPoint),
         }}
       />
       <div
-        className="pointer-events-none absolute inset-[-8%] mix-blend-screen"
+        className={cn(
+          "pointer-events-none absolute inset-[-8%]",
+          scene.nebulaBlendClassName,
+        )}
         style={{
           ...nebulaStyle,
-          opacity: 0.48,
-          background: `
-            radial-gradient(40% 28% at 28% 60%, rgba(56,189,248,0.11), transparent 72%),
-            radial-gradient(34% 26% at 72% 32%, rgba(250,204,21,0.1), transparent 74%),
-            radial-gradient(46% 32% at 50% 54%, rgba(99,102,241,0.08), transparent 78%)
-          `,
+          opacity: scene.nebulaOpacity,
+          background: scene.nebulaGradient,
           filter: "blur(16px)",
         }}
       />
       <div
-        className="pointer-events-none absolute inset-0 opacity-[0.1]"
+        className="pointer-events-none absolute inset-0"
         style={{
           backgroundImage: `
-            linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px)
+            linear-gradient(${scene.gridLineColor} 1px, transparent 1px),
+            linear-gradient(90deg, ${scene.gridLineColor} 1px, transparent 1px)
           `,
+          opacity: scene.gridOpacity,
           backgroundPosition: `${pan.x}px ${pan.y}px`,
           backgroundSize: `${gridSize}px ${gridSize}px`,
           maskImage: "radial-gradient(circle at center, black 20%, transparent 82%)",
@@ -1606,8 +1751,7 @@ function MeshRadarField({
         className="pointer-events-none absolute h-28 w-28 rounded-full"
         style={{
           ...selfHaloStyle,
-          background:
-            "radial-gradient(circle, rgba(255,255,255,0.18) 0%, rgba(192,132,252,0.14) 18%, rgba(59,130,246,0.08) 42%, transparent 72%)",
+          background: scene.selfHaloGradient,
           filter: "blur(10px)",
         }}
       />
@@ -1617,7 +1761,7 @@ function MeshRadarField({
           type="button"
           className={cn(
             "flex h-9 w-9 items-center justify-center rounded-full border backdrop-blur",
-            "border-white/10 bg-slate-950/70 text-slate-100 hover:bg-slate-900/80",
+            scene.chromeClassName,
           )}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => {
@@ -1632,7 +1776,7 @@ function MeshRadarField({
           type="button"
           className={cn(
             "flex h-9 w-9 items-center justify-center rounded-full border backdrop-blur",
-            "border-white/10 bg-slate-950/70 text-slate-100 hover:bg-slate-900/80",
+            scene.chromeClassName,
           )}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => {
@@ -1647,7 +1791,7 @@ function MeshRadarField({
           type="button"
           className={cn(
             "flex h-9 w-9 items-center justify-center rounded-full border backdrop-blur",
-            "border-white/10 bg-slate-950/70 text-slate-100 hover:bg-slate-900/80",
+            scene.chromeClassName,
           )}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => {
@@ -1664,7 +1808,7 @@ function MeshRadarField({
             type="button"
             className={cn(
               "rounded-full border px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] backdrop-blur",
-              "border-white/10 bg-slate-950/72 text-slate-100 hover:bg-slate-900/80",
+              scene.chromeClassName,
             )}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -1678,7 +1822,7 @@ function MeshRadarField({
             type="button"
             className={cn(
               "rounded-full border px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] backdrop-blur disabled:cursor-not-allowed disabled:opacity-45",
-              "border-white/10 bg-slate-950/72 text-slate-100 hover:bg-slate-900/80",
+              scene.chromeClassName,
             )}
             disabled={displayNodes.length <= 1}
             onPointerDown={(event) => event.stopPropagation()}
@@ -1693,7 +1837,7 @@ function MeshRadarField({
             type="button"
             className={cn(
               "rounded-full border px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.16em] backdrop-blur disabled:cursor-not-allowed disabled:opacity-45",
-              "border-white/10 bg-slate-950/72 text-slate-100 hover:bg-slate-900/80",
+              scene.chromeClassName,
             )}
             disabled={debugNodes.length === 0}
             onPointerDown={(event) => event.stopPropagation()}
@@ -1708,7 +1852,12 @@ function MeshRadarField({
       ) : null}
 
       {selectedModel && selectedModel !== "auto" ? (
-        <div className="pointer-events-none absolute right-5 top-4 rounded-full border border-amber-300/20 bg-amber-300/10 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.22em] text-amber-100/90">
+        <div
+          className={cn(
+            "pointer-events-none absolute right-5 top-4 rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.22em]",
+            scene.selectedModelClassName,
+          )}
+        >
           {shortName(selectedModel)}
         </div>
       ) : null}
@@ -1717,14 +1866,20 @@ function MeshRadarField({
         style={selfLabelStyle}
       >
         <div
-          className="text-[11px] font-medium uppercase tracking-[0.28em] text-white"
-          style={{ textShadow: "0 1px 10px rgba(0,0,0,0.72)" }}
+          className={cn(
+            "text-[11px] font-medium uppercase tracking-[0.28em]",
+            scene.selfLabelPrimaryClassName,
+          )}
+          style={{ textShadow: scene.selfLabelTextShadow }}
         >
           {selfNode?.hostname || "you / host"}
         </div>
         <div
-          className="mt-1 text-[10px] uppercase tracking-[0.22em] text-slate-200"
-          style={{ textShadow: "0 1px 10px rgba(0,0,0,0.72)" }}
+          className={cn(
+            "mt-1 text-[10px] uppercase tracking-[0.22em]",
+            scene.selfLabelSecondaryClassName,
+          )}
+          style={{ textShadow: scene.selfLabelTextShadow }}
         >
           {selfNode?.statusLabel || "connected"}
         </div>
@@ -1734,40 +1889,45 @@ function MeshRadarField({
           ref={tooltipRef}
           className={cn(
             "pointer-events-none absolute w-[9rem] rounded-xl border px-3 py-2 shadow-2xl backdrop-blur",
-            "border-white/10 bg-slate-950/88 text-white",
+            scene.tooltipClassName,
           )}
           style={tooltipStyle ?? { opacity: 0 }}
         >
           <div className="max-w-[16rem] text-xs font-medium">
             {hoveredNode.label}
           </div>
-          <div className="mt-0.5 text-[11px] text-slate-300">
+          <div className={cn("mt-0.5 text-[11px]", scene.tooltipSubtleTextClassName)}>
             {hoveredNode.subtitle}
           </div>
-          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-slate-300">
-            <div className="text-slate-500">Role</div>
+          <div
+            className={cn(
+              "mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]",
+              scene.tooltipSubtleTextClassName,
+            )}
+          >
+            <div className={scene.tooltipMutedTextClassName}>Role</div>
             <div>{hoveredNode.role}</div>
-            <div className="text-slate-500">Status</div>
+            <div className={scene.tooltipMutedTextClassName}>Status</div>
             <div>{hoveredNode.statusLabel}</div>
-            <div className="text-slate-500">VRAM</div>
+            <div className={scene.tooltipMutedTextClassName}>VRAM</div>
             <div>{hoveredNode.vramLabel}</div>
-            <div className="text-slate-500">Latency</div>
+            <div className={scene.tooltipMutedTextClassName}>Latency</div>
             <div>{hoveredNode.latencyLabel}</div>
             {!(hoveredNode.role === "Client" && hoveredNode.modelLabel === "API-only") ? (
               <>
-                <div className="text-slate-500">Model</div>
+                <div className={scene.tooltipMutedTextClassName}>Model</div>
                 <div className="truncate" title={hoveredNode.modelLabel}>
                   {hoveredNode.modelLabel}
                 </div>
               </>
             ) : null}
-            <div className="text-slate-500">Compute</div>
+            <div className={scene.tooltipMutedTextClassName}>Compute</div>
             <div>{hoveredNode.gpuLabel}</div>
           </div>
           <div
             className={cn(
               "mt-2 border-t pt-2 text-[10px]",
-              "border-white/10 text-slate-400",
+              scene.tooltipDividerClassName,
             )}
           >
             <div className="truncate" title={hoveredNode.id}>
