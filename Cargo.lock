@@ -3079,7 +3079,7 @@ version = "0.1.0"
 
 [[package]]
 name = "mesh-llm"
-version = "0.63.0-rc.1"
+version = "0.63.0-rc2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3158,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-plugin"
-version = "0.63.0-rc.1"
+version = "0.63.0-rc2"
 dependencies = [
  "anyhow",
  "async-trait",

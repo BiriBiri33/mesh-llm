@@ -652,24 +652,78 @@ pub fn expert_list_arg(assignment: &NodeAssignment) -> String {
         .join(",")
 }
 
+/// Strip the `-NNNNN-of-NNNNN` split-file suffix from a GGUF stem so that the
+/// cache directory name doesn't accidentally trigger llama.cpp's split-file
+/// detection when loading per-node MoE shards. Multi-file GGUFs from
+/// HuggingFace (e.g. `Model-00001-of-00013.gguf`) include this suffix in the
+/// filename; without stripping it the resulting cache path
+/// `.../splits/Model-00001-of-00013/N-nodes/node-K.gguf` causes
+/// `invalid split file name` at load time.
+fn strip_split_suffix(stem: &str) -> String {
+    split_stem_prefix(stem).unwrap_or(stem).to_string()
+}
+
+/// Match llama.cpp split naming exactly: `-NNNNN-of-NNNNN` at the end.
+fn split_stem_prefix(stem: &str) -> Option<&str> {
+    let suffix = stem.rfind("-of-")?;
+    let split_count = &stem[suffix + 4..];
+    if split_count.len() != 5 || !split_count.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let dash = stem[..suffix].rfind('-')?;
+    let split_index = &stem[dash + 1..suffix];
+    if split_index.len() != 5 || !split_index.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(&stem[..dash])
+}
+
 /// Path to the cached split GGUF for a given model + node count + node index.
 pub fn split_path(model_path: &Path, n_nodes: usize, node_index: usize) -> PathBuf {
     let stem = model_path.file_stem().unwrap_or_default().to_string_lossy();
+    let clean_stem = strip_split_suffix(&stem);
     let new_path = split_cache_root()
-        .join(format!("{stem}"))
+        .join(&clean_stem)
         .join(format!("{n_nodes}-nodes"))
         .join(format!("node-{node_index}.gguf"));
     migrate_legacy_split_if_present(model_path, n_nodes, node_index, &new_path);
     new_path
 }
 
-fn legacy_split_path(model_path: &Path, n_nodes: usize, node_index: usize) -> PathBuf {
-    let stem = model_path.file_stem().unwrap_or_default().to_string_lossy();
+fn legacy_split_path_for_stem(
+    model_path: &Path,
+    stem: &str,
+    n_nodes: usize,
+    node_index: usize,
+) -> PathBuf {
     let dir = model_path.parent().unwrap_or(Path::new("."));
     dir.join("moe-splits")
-        .join(format!("{stem}"))
+        .join(stem)
         .join(format!("{n_nodes}-nodes"))
         .join(format!("node-{node_index}.gguf"))
+}
+
+fn legacy_split_paths(model_path: &Path, n_nodes: usize, node_index: usize) -> Vec<PathBuf> {
+    let stem = model_path.file_stem().unwrap_or_default().to_string_lossy();
+    let stem = stem.as_ref();
+    let stripped_stem = strip_split_suffix(stem);
+    // Backward compatibility for v0.63.0: migrate legacy MoE shards from both
+    // the old raw-stem directory and the new stripped-stem directory. This can
+    // be removed in a future version once older cache layouts no longer matter.
+    let mut paths = vec![legacy_split_path_for_stem(
+        model_path, stem, n_nodes, node_index,
+    )];
+    if stripped_stem != stem {
+        paths.push(legacy_split_path_for_stem(
+            model_path,
+            &stripped_stem,
+            n_nodes,
+            node_index,
+        ));
+    }
+    paths
 }
 
 fn migrate_legacy_split_if_present(
@@ -682,10 +736,12 @@ fn migrate_legacy_split_if_present(
         return;
     }
 
-    let legacy_path = legacy_split_path(model_path, n_nodes, node_index);
-    if !legacy_path.exists() {
+    let Some(legacy_path) = legacy_split_paths(model_path, n_nodes, node_index)
+        .into_iter()
+        .find(|path| path.exists())
+    else {
         return;
-    }
+    };
 
     if let Some(parent) = new_path.parent() {
         if std::fs::create_dir_all(parent).is_err() {
@@ -929,6 +985,53 @@ mod tests {
     }
 
     #[test]
+    fn strip_split_suffix_removes_huggingface_shard_pattern() {
+        assert_eq!(
+            strip_split_suffix("Kimi-K2.5-Q4_K_M-00001-of-00013"),
+            "Kimi-K2.5-Q4_K_M"
+        );
+        assert_eq!(
+            strip_split_suffix("DeepSeek-V3-BF16-00001-of-00163"),
+            "DeepSeek-V3-BF16"
+        );
+        assert_eq!(strip_split_suffix("model-1-of-2"), "model-1-of-2");
+        assert_eq!(strip_split_suffix("model-001-of-003"), "model-001-of-003");
+        // Single-file GGUFs should pass through unchanged
+        assert_eq!(
+            strip_split_suffix("Qwen3-30B-A3B-Q4_K_M"),
+            "Qwen3-30B-A3B-Q4_K_M"
+        );
+        // Don't strip if the pattern doesn't look like digits
+        assert_eq!(
+            strip_split_suffix("model-name-of-something"),
+            "model-name-of-something"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn split_path_strips_multifile_suffix() {
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+        std::env::set_var("XDG_CACHE_HOME", "/tmp/mesh-llm-cache-root");
+
+        // Multi-file GGUF: the -00001-of-00013 should be stripped from the cache dir
+        let model = Path::new("/models/Kimi-K2.5-Q4_K_M-00001-of-00013.gguf");
+        let path = split_path(model, 29, 22);
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/mesh-llm-cache-root")
+                .join("mesh-llm")
+                .join("splits")
+                .join("Kimi-K2.5-Q4_K_M")
+                .join("29-nodes")
+                .join("node-22.gguf")
+        );
+
+        restore_env("XDG_CACHE_HOME", prev_xdg);
+    }
+
+    #[test]
     #[serial]
     fn split_path_migrates_legacy_split_if_present() {
         let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
@@ -954,6 +1057,48 @@ mod tests {
         assert!(new_path.exists());
         assert_eq!(std::fs::read(&new_path).unwrap(), b"legacy-split");
         assert!(!legacy.exists());
+
+        restore_env("XDG_CACHE_HOME", prev_xdg);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[serial]
+    fn split_path_migrates_legacy_split_from_unstripped_multifile_stem() {
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+        let base = std::env::temp_dir().join(format!(
+            "mesh-llm-moe-migrate-multifile-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let cache_root = base.join("cache");
+        let model_root = base.join("models");
+        let model_path = model_root.join("demo-00001-of-00013.gguf");
+        let legacy = model_root
+            .join("moe-splits")
+            .join("demo-00001-of-00013")
+            .join("2-nodes")
+            .join("node-0.gguf");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&model_root).unwrap();
+        std::fs::write(&model_path, b"model").unwrap();
+        std::fs::write(&legacy, b"legacy-split").unwrap();
+        std::env::set_var("XDG_CACHE_HOME", &cache_root);
+
+        let new_path = split_path(&model_path, 2, 0);
+
+        assert!(new_path.exists());
+        assert_eq!(std::fs::read(&new_path).unwrap(), b"legacy-split");
+        assert!(!legacy.exists());
+        assert_eq!(
+            new_path,
+            cache_root
+                .join("mesh-llm")
+                .join("splits")
+                .join("demo")
+                .join("2-nodes")
+                .join("node-0.gguf")
+        );
 
         restore_env("XDG_CACHE_HOME", prev_xdg);
         let _ = std::fs::remove_dir_all(&base);
