@@ -710,6 +710,7 @@ fn shell_display(arg: &OsString) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::moe::MoeAnalyzeCommand;
     use clap::Parser;
 
     #[test]
@@ -857,6 +858,65 @@ mod tests {
             Command::Gpus { json, command } => {
                 assert!(!json);
                 assert!(command.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moe_analyze_full_accepts_share_flag() {
+        let cli = Cli::parse_from([
+            "mesh-llm",
+            "moe",
+            "analyze",
+            "full",
+            "Qwen/Qwen3",
+            "--share",
+            "--dataset-repo",
+            "meshllm/custom-rankings",
+        ]);
+
+        match cli.command.expect("moe command expected") {
+            Command::Moe {
+                command:
+                    MoeCommand::Analyze {
+                        command:
+                            MoeAnalyzeCommand::Full {
+                                share,
+                                hf_job,
+                                model,
+                                ..
+                            },
+                    },
+            } => {
+                assert!(share);
+                assert_eq!(model, "Qwen/Qwen3");
+                assert_eq!(hf_job.dataset_repo, "meshllm/custom-rankings");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moe_analyze_micro_accepts_share_flag() {
+        let cli = Cli::parse_from([
+            "mesh-llm",
+            "moe",
+            "analyze",
+            "micro",
+            "Qwen/Qwen3",
+            "--share",
+        ]);
+
+        match cli.command.expect("moe command expected") {
+            Command::Moe {
+                command:
+                    MoeCommand::Analyze {
+                        command: MoeAnalyzeCommand::Micro { share, model, .. },
+                    },
+            } => {
+                assert!(share);
+                assert_eq!(model, "Qwen/Qwen3");
             }
             other => panic!("unexpected command: {other:?}"),
         }

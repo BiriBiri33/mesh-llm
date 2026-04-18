@@ -48,6 +48,9 @@ pub(crate) enum MoeAnalyzeCommand {
     Full {
         /// Model spec: local path, catalog name, HF exact ref, HF repo selector like `org/repo:BF16@main`, or HF URL.
         model: String,
+        /// Automatically run `mesh-llm moe share` after a successful local analysis.
+        #[arg(long)]
+        share: bool,
         /// Override context size passed to llama-moe-analyze.
         #[arg(long, default_value = "4096")]
         context_size: u32,
@@ -61,6 +64,9 @@ pub(crate) enum MoeAnalyzeCommand {
     Micro {
         /// Model spec: local path, catalog name, HF exact ref, HF repo selector like `org/repo:BF16@main`, or HF URL.
         model: String,
+        /// Automatically run `mesh-llm moe share` after a successful local analysis.
+        #[arg(long)]
+        share: bool,
         /// Number of canonical prompts to use.
         #[arg(long, default_value = "8")]
         prompt_count: usize,
@@ -83,7 +89,7 @@ pub(crate) struct HfJobArgs {
     /// Submit this MoE analyze run to Hugging Face Jobs instead of running locally.
     #[arg(long)]
     pub(crate) hf_job: bool,
-    /// Dataset repo to contribute to when the remote analysis succeeds.
+    /// Dataset repo to contribute to when auto-sharing or when the remote analysis succeeds.
     #[arg(long, default_value = "meshllm/moe-rankings")]
     pub(crate) dataset_repo: String,
     /// HF Jobs hardware flavor, e.g. cpu-xl, cpu-performance, l40sx1.
