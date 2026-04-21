@@ -35,9 +35,9 @@ pub use search::{
 };
 pub use topology::{infer_local_model_topology, ModelMoeInfo, ModelTopology};
 pub use usage::{
-    execute_model_cleanup, load_model_usage_record_for_path,
-    model_usage_cache_dir, plan_model_cleanup, track_managed_model_usage, track_model_usage,
-    ModelCleanupPlan, ModelCleanupResult,
+    execute_model_cleanup, load_model_usage_record_for_path, model_usage_cache_dir,
+    plan_model_cleanup, track_managed_model_usage, track_model_usage, ModelCleanupPlan,
+    ModelCleanupResult,
 };
 
 pub(crate) fn build_hf_api(_progress: bool) -> Result<HFClientSync> {

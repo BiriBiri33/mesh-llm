@@ -30,7 +30,10 @@ pub async fn delete_model_at_path(identifier: &str, _dry_run: bool) -> Result<De
     let hf_root = crate::models::huggingface_hub_cache_dir();
     let mesh_root = crate::models::model_usage_cache_dir();
     if !path.starts_with(&hf_root) && !path.starts_with(&mesh_root) {
-        bail!("Deletion target outside known model roots: {}", path.display());
+        bail!(
+            "Deletion target outside known model roots: {}",
+            path.display()
+        );
     }
 
     let cleanup_result = delete_model_by_path(&path).context("delete model")?;
