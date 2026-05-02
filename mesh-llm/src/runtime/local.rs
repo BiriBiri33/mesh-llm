@@ -19,6 +19,7 @@ pub(super) struct LocalRuntimeModelHandle {
     pub(super) process: launch::InferenceServerHandle,
     pub(super) backend_proxy: backend::BackendProxyHandle,
     pub(super) context_length: u32,
+    pub(super) slots: usize,
 }
 
 impl LocalRuntimeModelHandle {
@@ -211,6 +212,13 @@ pub(super) async fn start_runtime_local_model(
             total_group_vram: None,
             selected_gpu: None,
             slots: spec.slots,
+            runtime_data_producer: Some(spec.node.runtime_data_collector().producer(
+                crate::runtime_data::RuntimeDataSource {
+                    scope: "runtime",
+                    plugin_data_key: None,
+                    plugin_endpoint_key: None,
+                },
+            )),
         },
     )
     .await?;
@@ -225,6 +233,7 @@ pub(super) async fn start_runtime_local_model(
             process: process.handle,
             backend_proxy,
             context_length: process.context_length,
+            slots: spec.slots,
         },
         process.death_rx,
     ))
@@ -235,12 +244,30 @@ pub(super) fn local_process_payload(
     backend: &str,
     port: u16,
     pid: u32,
+    slots: usize,
+    context_length: u32,
 ) -> api::RuntimeProcessPayload {
-    api::RuntimeProcessPayload {
-        name: model_name.to_string(),
+    local_process_snapshot(model_name, backend, port, pid, slots, context_length).to_payload()
+}
+
+pub(super) fn local_process_snapshot(
+    model_name: &str,
+    backend: &str,
+    port: u16,
+    pid: u32,
+    slots: usize,
+    context_length: u32,
+) -> crate::runtime_data::RuntimeProcessSnapshot {
+    crate::runtime_data::RuntimeProcessSnapshot {
+        model: model_name.to_string(),
         backend: backend.into(),
-        status: "ready".into(),
-        port,
         pid,
+        slots,
+        port,
+        context_length: Some(context_length),
+        command: None,
+        state: "ready".into(),
+        start: None,
+        health: Some("ready".into()),
     }
 }

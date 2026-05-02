@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MESH_BIN="${MESH_BIN:-$ROOT/target/release/mesh-llm}"
-BIN_DIR="${BIN_DIR:-$ROOT/llama.cpp/build/bin}"
+BIN_DIR="${BIN_DIR:-$ROOT/.deps/llama.cpp/build/bin}"
 HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}/hub}"
 MODEL_PATH="${MODEL_PATH:-$HF_CACHE_DIR/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf}"
 MODEL_NAME="${MODEL_NAME:-$(basename "$MODEL_PATH" .gguf)}"

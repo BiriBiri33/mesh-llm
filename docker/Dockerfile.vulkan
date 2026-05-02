@@ -91,7 +91,9 @@ RUN git clone --depth 1 -b v1.3.296 https://github.com/KhronosGroup/Vulkan-Heade
     cmake --install /tmp/Vulkan-Headers/build && \
     rm -rf /tmp/Vulkan-Headers
 WORKDIR /src
-RUN git clone -b master --depth 1 https://github.com/Mesh-LLM/llama.cpp.git
+COPY scripts/prepare-llama.sh scripts/prepare-llama.sh
+COPY third_party/llama.cpp/ third_party/llama.cpp/
+RUN scripts/prepare-llama.sh pinned
 RUN cd llama.cpp && git rev-parse HEAD > /tmp/llama-sha.txt
 RUN cd llama.cpp && \
     cmake -B build -G Ninja \

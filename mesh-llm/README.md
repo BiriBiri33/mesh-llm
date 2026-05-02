@@ -2,7 +2,7 @@
 
 Rust implementation of mesh-llm: a peer-to-peer control plane for llama.cpp inference over QUIC, with distributed routing, model orchestration, plugin hosting, and a local management API.
 
-For install and end-user usage, see the [project README](../README.md). For deeper architecture and test flows, see [docs/DESIGN.md](docs/DESIGN.md), [docs/METRICS.md](docs/METRICS.md), [docs/TESTING.md](docs/TESTING.md), and [docs/message_protocol.md](docs/message_protocol.md).
+For install and end-user usage, see the [project README](../README.md). For deeper architecture and test flows, see [docs/DESIGN.md](docs/DESIGN.md), [docs/METRICS.md](docs/METRICS.md), [docs/TESTING.md](docs/TESTING.md), [docs/message_protocol.md](docs/message_protocol.md), and [docs/LLAMA_STAGE_INTEGRATION_PLAN.md](docs/LLAMA_STAGE_INTEGRATION_PLAN.md).
 
 ## Source layout
 
@@ -53,6 +53,7 @@ The management API exposes the state the UI uses directly:
 - `GET /api/models` for mesh model inventory and `GET /api/runtime*` for loaded model/process state
 - `GET /api/search` for read-only catalog or Hugging Face model search, returning the same JSON payload shape as `mesh-llm models search --json`
 - `GET`/`POST`/`DELETE /api/model-interests` for local explicit-interest submission and readback using canonical model refs such as `org/repo@rev:variant`
+- `GET /api/model-targets` for ranked model targets derived from explicit interest, active demand, and current serving visibility, with raw `signals` kept separate from derived `target_rank`/`wanted` hints
 - `GET /api/discover` for mesh discovery results
 - `GET /api/plugins` plus per-plugin tool endpoints
 - `GET /api/blackboard/feed`, `GET /api/blackboard/search`, `POST /api/blackboard/post`

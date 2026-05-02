@@ -11,7 +11,7 @@
 #   llama-moe-split (unsuffixed — same across flavors)
 #
 # llama.cpp revision: tracked at /usr/local/share/mesh-llm/llama-revision.txt
-# Upstream branch: Mesh-LLM/llama.cpp@master (moving target)
+# Source: ggml-org/llama.cpp upstream pin plus Mesh-LLM patch queue
 
 # syntax=docker/dockerfile:1.7
 
@@ -88,7 +88,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake ninja-build build-essential git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN git clone -b master --depth 1 https://github.com/Mesh-LLM/llama.cpp.git
+COPY scripts/prepare-llama.sh scripts/prepare-llama.sh
+COPY third_party/llama.cpp/ third_party/llama.cpp/
+RUN scripts/prepare-llama.sh pinned
 RUN cd llama.cpp && git rev-parse HEAD > /tmp/llama-sha.txt
 RUN cd llama.cpp && \
     cmake -B build -G Ninja \

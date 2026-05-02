@@ -54,10 +54,10 @@ import { cn } from "../../../lib/utils";
 import {
   formatLiveNodeState,
   formatLatency,
+  displayVramGb,
   localRoutableModels,
   meshGpuVram,
   modelDisplayName,
-  overviewVramGb,
   ownershipPrimaryLabel,
   ownershipStatusLabel,
   ownershipTone,
@@ -86,6 +86,7 @@ import {
 } from "./details";
 import { MeshTopologyDiagram } from "./topology";
 import { useDashboardDetailStack } from "../hooks/useDashboardDetailStack";
+import { useLlamaRuntime } from "../hooks/useLlamaRuntime";
 import { WakeableCapacity } from "./WakeableCapacity";
 
 const DOCS_URL = "https://docs.anarchai.org";
@@ -190,8 +191,8 @@ export function DashboardPage({
   }, [status]);
   const sortedPeers = useMemo(() => {
     return [...(status?.peers ?? [])].sort((a, b) => {
-      const bOverviewVramGb = overviewVramGb(b.state === "client", b.vram_gb);
-      const aOverviewVramGb = overviewVramGb(a.state === "client", a.vram_gb);
+      const bOverviewVramGb = displayVramGb(b.state === "client", b.vram_gb, b.gpus);
+      const aOverviewVramGb = displayVramGb(a.state === "client", a.vram_gb, a.gpus);
       return bOverviewVramGb - aOverviewVramGb || a.id.localeCompare(b.id);
     });
   }, [status?.peers]);
@@ -201,14 +202,14 @@ export function DashboardPage({
       const modelLabel =
         primaryModel && primaryModel !== "(idle)" ? shortName(primaryModel) : "idle";
       const latencyLabel = formatLatency(peer.rtt_ms);
-      const displayVramGb = overviewVramGb(peer.state === "client", peer.vram_gb);
+      const peerDisplayVramGb = displayVramGb(peer.state === "client", peer.vram_gb, peer.gpus);
       const sharePct =
         peer.state !== "client" && totalMeshVramGb > 0
-          ? Math.round((displayVramGb / totalMeshVramGb) * 100)
+          ? Math.round((peerDisplayVramGb / totalMeshVramGb) * 100)
           : null;
       return {
         ...peer,
-        displayVramGb,
+        displayVramGb: peerDisplayVramGb,
         modelLabel,
         latencyLabel,
         shareLabel: sharePct == null ? "n/a" : `${sharePct}%`,
@@ -227,15 +228,19 @@ export function DashboardPage({
     const totalModelVram = selectedCatalogModel.mesh_vram_gb ?? 0;
     const rows: ActivePeerRow[] = [];
     const localServing = localRoutableModels(status).includes(targetModel);
-    const localClientVram = overviewVramGb(status.node_state === "client", status.my_vram_gb);
+    const localDisplayVramGb = displayVramGb(
+      status.node_state === "client",
+      status.my_vram_gb,
+      status.gpus,
+    );
     if (localServing && status.node_state !== "client") {
       rows.push({
         id: status.node_id,
         latencyLabel: "local",
-        vramLabel: `${localClientVram.toFixed(1)} GB`,
+        vramLabel: `${localDisplayVramGb.toFixed(1)} GB`,
         shareLabel:
           totalModelVram > 0
-            ? `${Math.round((localClientVram / totalModelVram) * 100)}%`
+            ? `${Math.round((localDisplayVramGb / totalModelVram) * 100)}%`
             : "n/a",
       });
     }
@@ -310,6 +315,7 @@ export function DashboardPage({
         !topologyNode.self && !topologyNode.hostname && !(topologyNode.gpus?.length ?? 0),
     } satisfies NodeSidebarRecord;
   }, [activeDetail, status, topologyNodes, totalMeshVramGb]);
+  const llamaRuntime = useLlamaRuntime(activeDetail?.kind === "node" && activeNode?.self === true);
 
   useEffect(() => {
     const prevOverflow = document.body.style.overflow;
@@ -712,6 +718,9 @@ export function DashboardPage({
             <NodeSidebar
               node={activeNode}
               meshModelByName={meshModelByName}
+              llamaRuntime={llamaRuntime.data}
+              llamaRuntimeLoading={llamaRuntime.loading}
+              llamaRuntimeError={llamaRuntime.error}
               onOpenModel={openModelDetail}
               onBack={detailPanelStack.length > 1 ? goBackDetailPanel : undefined}
             />

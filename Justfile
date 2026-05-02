@@ -1,6 +1,6 @@
 # Distributed LLM Inference — build & run tasks
 
-llama_dir := "llama.cpp"
+llama_dir := env("MESH_LLM_LLAMA_DIR", ".deps/llama.cpp")
 build_dir := llama_dir / "build"
 mesh_dir := "mesh-llm"
 ui_dir := mesh_dir / "ui"
@@ -50,6 +50,14 @@ release-build:
 # Build a Linux ARM64 CPU release artifact on a native ARM64 runner.
 release-build-arm64:
     @scripts/build-release.sh
+
+# Prepare the pinned llama.cpp checkout and apply the Mesh-LLM patch queue.
+llama-prepare:
+    @scripts/prepare-llama.sh pinned
+
+# Prepare llama.cpp at upstream master and apply the Mesh-LLM patch queue.
+llama-prepare-latest:
+    @scripts/prepare-llama.sh latest
 
 release-build-windows:
     @powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Backend cpu
@@ -306,6 +314,14 @@ auto: build
 
 # ── Utilities ──────────────────────────────────────────────────
 
+# Update both tracked llama.cpp pin files from the prepared checkout.
+llama-update-pin:
+    scripts/update-llama-pin.sh
+
+# Render a Markdown summary for a llama.cpp upstream pin change.
+llama-summary old new:
+    scripts/summarize-llama-upstream.sh "{{ old }}" "{{ new }}"
+
 # Clean UI build artifacts (node_modules, dist). Fixes stale npm state.
 [unix]
 clean-ui:
@@ -332,11 +348,11 @@ test port="9337":
 
 # Optional SDK compatibility smoke: 2 mesh nodes + 1 lite client.
 compat-smoke model mmproj="":
-    scripts/ci-compat-smoke.sh "target/release/mesh-llm" "llama.cpp/build/bin" "{{ model }}" "{{ mmproj }}"
+    scripts/ci-compat-smoke.sh "target/release/mesh-llm" "{{ build_dir }}/bin" "{{ model }}" "{{ mmproj }}"
 
 # Direct splitter smoke for the MoE families we actively use.
 moe-split-smoke families="all":
-    scripts/moe-split-smoke.sh "llama.cpp/build/bin" {{ families }}
+    scripts/moe-split-smoke.sh "{{ build_dir }}/bin" {{ families }}
 
 # Validate an already-running MoE deployment end-to-end through one API/console pair.
 moe-live-smoke model api_url console_url expected_nodes="2" timeout="120":
@@ -346,9 +362,9 @@ moe-live-smoke model api_url console_url expected_nodes="2" timeout="120":
 bench-prefix-affinity:
     @scripts/benchmark-prefix-affinity.sh
 
-# Show our custom commits on top of upstream llama.cpp
+# Show the local llama.cpp patch queue
 diff:
-    cd {{ llama_dir }} && git log --oneline --ancestry-path $(git merge-base HEAD upstream/master 2>/dev/null || echo HEAD~8)..HEAD
+    ls -1 third_party/llama.cpp/patches
 
 # Build the client-only Docker image (no GPU, no llama.cpp)
 [unix]

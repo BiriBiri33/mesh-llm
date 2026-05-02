@@ -120,6 +120,29 @@ mesh-llm serve --auto                      # find and join the best mesh
 mesh-llm client --auto                     # join as API-only client (no GPU)
 ```
 
+## Output
+
+`mesh-llm` has two terminal output modes:
+
+- `--log-format pretty` renders human-readable output. In `serve` on an interactive TTY, this becomes the full dashboard; otherwise it falls back to line-oriented pretty output.
+- `--log-format json` writes newline-delimited JSON records to `stdout`, which keeps it safe for `jq`, log shippers, and shell pipelines.
+
+JSON mode example:
+
+```json
+{"timestamp":"...","level":"info","event":"llama_ready","model":"Qwen3-32B","port":8001,"ctx_size":8192,"message":"Qwen3-32B ready on internal port 8001"}
+{"timestamp":"...","level":"info","event":"model_ready","model":"Qwen3-32B","port":38373,"internal_port":38373,"role":"host","message":"model Qwen3-32B ready on port 38373"}
+{"timestamp":"...","level":"info","event":"ready","api_url":"http://localhost:9337","console_url":"http://localhost:3131","api_port":9337,"console_port":3131,"models_count":2,"message":"mesh-llm runtime ready"}
+```
+
+Line-oriented pretty sessions accept these commands after startup is ready:
+
+- `h` shows help
+- `i` prints the current mesh status snapshot
+- `q` quits cleanly
+
+For the full event taxonomy and field reference, see [mesh-llm/src/cli/output/EVENTS.md](mesh-llm/src/cli/output/EVENTS.md).
+
 ## How it works
 
 Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`. Distribution is automatic — you just say `mesh-llm serve --model X` and the mesh figures out the best strategy:
@@ -129,7 +152,7 @@ Every node gets an OpenAI-compatible API at `http://localhost:9337/v1`. Distribu
 - **MoE model too big?** → expert parallelism — experts split across nodes, zero cross-node traffic
 
 If a node has enough VRAM, it always runs the full model. Splitting only happens when it has to.
-Currently using a lightly forked version of llama.cpp (see the Justfile for where it pulls branch from).
+Currently using upstream llama.cpp with a pinned Mesh-LLM patch queue; see [mesh-llm/docs/LLAMA_CPP_FORK.md](mesh-llm/docs/LLAMA_CPP_FORK.md).
 
 **Pipeline parallelism** — for dense models that don't fit on one machine, layers are distributed across nodes proportional to VRAM. llama-server runs on the highest-VRAM node and coordinates via RPC. Each rpc-server loads only its assigned layers from local disk. Latency-aware: peers are selected by lowest RTT first, with an 80ms hard cap — high-latency nodes stay in the mesh as API clients but don't participate in splits.
 
@@ -423,9 +446,40 @@ mesh-llm client --auto --port 9337
 curl -s http://localhost:9337/v1/models | jq '.data[].id'
 ```
 
-### Lemonade
+### External OpenAI-compatible backends (vLLM, TGI, Ollama, Lemonade, etc.)
 
-mesh-llm ships a built-in `lemonade` plugin that registers a local [Lemonade Server](https://lemonade-server.ai) as another OpenAI-compatible backend. For setup and verification steps, see [docs/USAGE.md](docs/USAGE.md#lemonade-integration).
+The `openai-endpoint` plugin routes inference to any server that speaks the OpenAI `/v1/chat/completions` API. The server does all the inference work — mesh-llm just discovers its models and routes requests to it.
+
+Enable the plugin in `~/.mesh-llm/config.toml` with the URL:
+
+```toml
+# vLLM
+[[plugin]]
+name = "openai-endpoint"
+url = "http://gpu-box:8000/v1"
+
+# Ollama
+[[plugin]]
+name = "openai-endpoint"
+url = "http://localhost:11434/v1"
+
+# Lemonade
+[[plugin]]
+name = "openai-endpoint"
+url = "http://localhost:8000/api/v1"
+```
+
+```bash
+mesh-llm serve
+```
+
+The URL can also be set via `MESH_LLM_OPENAI_ENDPOINT_URL` env var (config takes precedence). Default: `http://localhost:8000/v1`. The plugin health-checks the backend by probing `GET /v1/models` — models appear and disappear automatically as the backend starts and stops.
+
+To use an external backend without loading any llama.cpp models:
+
+```bash
+mesh-llm client
+```
 
 If you want the mesh to be discoverable via `--auto`, publish it:
 
@@ -548,7 +602,8 @@ You can also try the hosted demo:
 - [CONTRIBUTING.md](CONTRIBUTING.md) for local development and build workflows
 - [PLUGINS.md](PLUGINS.md) for the plugin system and blackboard internals
 - [mesh-llm/docs/VIRTUAL_LLM.md](mesh-llm/docs/VIRTUAL_LLM.md) for inter-model collaboration design
-- [mesh-llm/docs/LLAMA_CPP_FORK.md](mesh-llm/docs/LLAMA_CPP_FORK.md) for llama.cpp fork maintenance
+- [mesh-llm/docs/LLAMA_CPP_FORK.md](mesh-llm/docs/LLAMA_CPP_FORK.md) for llama.cpp patch queue maintenance
+- [mesh-llm/docs/LLAMA_STAGE_INTEGRATION_PLAN.md](mesh-llm/docs/LLAMA_STAGE_INTEGRATION_PLAN.md) for the planned llama-stage-runtime integration
 - [mesh-llm/README.md](mesh-llm/README.md) for Rust crate structure
 - [ROADMAP.md](ROADMAP.md) for future work
 

@@ -215,6 +215,7 @@ impl ExternalMcpClient {
                 }
                 #[cfg(not(unix))]
                 {
+                    let _ = path;
                     Err(anyhow!(
                         "Unix socket MCP endpoint '{}:{}' is unsupported on this platform",
                         endpoint.plugin_name,
@@ -222,7 +223,7 @@ impl ExternalMcpClient {
                     ))
                 }
             }
-            // ─── CORRECCIÓN: capturar `name` en el patrón ─────────────────────
+
             ExternalMcpTransport::NamedPipe { name } => {
                 #[cfg(windows)]
                 {
@@ -238,6 +239,7 @@ impl ExternalMcpClient {
                 }
                 #[cfg(not(windows))]
                 {
+                    let _ = name;
                     Err(anyhow!(
                         "Named pipe MCP endpoint '{}:{}' is unsupported on this platform",
                         endpoint.plugin_name,
@@ -481,11 +483,12 @@ impl PluginMcpServer {
     }
 
     async fn active_external_mcp_endpoints(&self) -> Result<Vec<ExternalMcpEndpoint>, ErrorData> {
-        let endpoints = self
+        let passive_endpoint_summaries = self
             .plugin_manager
             .endpoints()
             .await
-            .map_err(internal_error)?
+            .map_err(internal_error)?;
+        let endpoints = passive_endpoint_summaries
             .into_iter()
             .filter_map(ExternalMcpEndpoint::from_summary)
             .collect::<Vec<_>>();

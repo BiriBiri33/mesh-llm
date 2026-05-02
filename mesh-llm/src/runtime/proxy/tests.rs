@@ -282,8 +282,8 @@ async fn start_inference_endpoint_plugin_manager(
     let plugin_manager = plugin::PluginManager::for_test_bridge(&[], Arc::new(NoopTestBridge));
     plugin_manager
         .set_test_inference_endpoints(vec![plugin::InferenceEndpointRoute {
-            plugin_name: plugin::LEMONADE_PLUGIN_ID.into(),
-            endpoint_id: "lemonade".into(),
+            plugin_name: plugin::OPENAI_ENDPOINT_PLUGIN_ID.into(),
+            endpoint_id: "openai-endpoint".into(),
             address,
             models,
         }])
@@ -621,6 +621,7 @@ async fn test_moe_remote_failure_removes_peer_for_faildown() {
         hosted_models_known: true,
         available_models: vec![],
         requested_models: vec![],
+        explicit_model_interests: vec![],
         last_seen: std::time::Instant::now(),
         last_mentioned: std::time::Instant::now(),
         moe_recovered_at: None,

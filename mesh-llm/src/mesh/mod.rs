@@ -28,6 +28,22 @@ use crate::crypto::{
 use crate::inference::moe;
 use crate::protocol::*;
 
+const PRETTY_LOCAL_REQUEST_WINDOW_SECS: u64 = 24 * 60 * 60;
+
+fn emit_mesh_info(message: String) {
+    let _ = crate::cli::output::emit_event(crate::cli::output::OutputEvent::Info {
+        message,
+        context: None,
+    });
+}
+
+fn emit_mesh_warning(message: String) {
+    let _ = crate::cli::output::emit_event(crate::cli::output::OutputEvent::Warning {
+        message,
+        context: None,
+    });
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -664,6 +680,8 @@ pub(crate) struct PeerAnnouncement {
     /// All GGUF filenames on disk in managed or legacy local storage (for mesh catalog)
     pub(crate) available_models: Vec<String>,
     pub(crate) requested_models: Vec<String>,
+    /// Advisory canonical refs this node wants the mesh to consider.
+    pub(crate) explicit_model_interests: Vec<String>,
     pub(crate) version: Option<String>,
     pub(crate) model_demand: HashMap<String, ModelDemand>,
     pub(crate) mesh_id: Option<String>,
@@ -704,6 +722,8 @@ pub struct PeerInfo {
     pub available_models: Vec<String>,
     /// Models this node has requested the mesh to serve
     pub requested_models: Vec<String>,
+    /// Advisory canonical refs this peer wants the mesh to consider.
+    pub explicit_model_interests: Vec<String>,
     /// Last time we directly communicated with this peer (gossip, heartbeat, tunnel).
     /// Only updated by direct bi-directional gossip exchanges, heartbeat probes,
     /// and inbound connections — never by transitive mentions.
@@ -773,6 +793,7 @@ impl PeerInfo {
             hosted_models_known: ann.hosted_models.is_some(),
             available_models: ann.available_models.clone(),
             requested_models: ann.requested_models.clone(),
+            explicit_model_interests: ann.explicit_model_interests.clone(),
             last_seen: std::time::Instant::now(),
             last_mentioned: std::time::Instant::now(),
             moe_recovered_at: None,
@@ -846,6 +867,12 @@ impl PeerInfo {
 /// Peers not directly verified within this window are considered stale
 /// and excluded from gossip propagation. After 2x this duration they're removed entirely.
 const PEER_STALE_SECS: u64 = 180; // 3 minutes
+
+/// How long a dead-peer entry blocks transitive re-learning and outbound
+/// reconnection. After this period the entry expires silently and the peer
+/// can be re-discovered through normal gossip propagation. If the peer is
+/// genuinely gone, no bridge peer will mention it and it stays forgotten.
+const DEAD_PEER_TTL: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
 /// Detect available VRAM. On Apple Silicon, uses ~75% of system RAM
 /// (the rest is reserved for OS/apps on unified memory).
 /// Detect available memory for model loading, capped by max_vram_gb if set.
@@ -984,6 +1011,7 @@ pub struct Node {
     llama_ready: Arc<Mutex<bool>>,
     available_models: Arc<Mutex<Vec<String>>>,
     requested_models: Arc<Mutex<Vec<String>>>,
+    explicit_model_interests: Arc<Mutex<Vec<String>>>,
     /// Mesh-wide demand map — merged from gossip + local API requests.
     /// This is the single source of truth for "what does the mesh want?"
     model_demand: Arc<std::sync::Mutex<HashMap<String, ModelDemand>>>,
@@ -996,6 +1024,8 @@ pub struct Node {
     inflight_requests: Arc<std::sync::atomic::AtomicUsize>,
     inflight_change_tx: watch::Sender<u64>,
     routing_metrics: crate::network::metrics::RoutingMetrics,
+    local_request_metrics: Arc<LocalRequestMetricsSampler>,
+    runtime_data_producer: crate::runtime_data::RuntimeDataProducer,
     tunnel_tx: tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
     tunnel_http_tx:
         tokio::sync::mpsc::Sender<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)>,
@@ -1018,6 +1048,103 @@ pub struct Node {
     config_revision_tx: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LocalRequestMetricsSnapshot {
+    pub accepted_request_counts: Vec<u64>,
+    pub latency_samples_ms: Vec<u64>,
+}
+
+#[derive(Default)]
+struct LocalRequestMetricsSampler {
+    inner: std::sync::Mutex<LocalRequestMetricsWindow>,
+}
+
+#[derive(Default)]
+struct LocalRequestMetricsWindow {
+    accepted_by_second: VecDeque<(u64, u64)>,
+    completed_latencies_ms: VecDeque<(u64, u64)>,
+}
+
+impl LocalRequestMetricsSampler {
+    fn record_request_accepted(&self) {
+        let now_sec = now_secs();
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("pretty request metrics mutex poisoned");
+        guard.prune(now_sec);
+        if let Some((second, count)) = guard.accepted_by_second.back_mut() {
+            if *second == now_sec {
+                *count += 1;
+                return;
+            }
+        }
+        guard.accepted_by_second.push_back((now_sec, 1));
+    }
+
+    fn record_request_completed(&self, started_at: std::time::Instant) {
+        let now_sec = now_secs();
+        let latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("pretty request metrics mutex poisoned");
+        guard.prune(now_sec);
+        guard
+            .completed_latencies_ms
+            .push_back((now_sec, latency_ms));
+    }
+
+    fn snapshot(&self) -> LocalRequestMetricsSnapshot {
+        let now_sec = now_secs();
+        let window_start = now_sec.saturating_sub(PRETTY_LOCAL_REQUEST_WINDOW_SECS - 1);
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("pretty request metrics mutex poisoned");
+        guard.prune(now_sec);
+
+        let accepted_by_second = guard
+            .accepted_by_second
+            .iter()
+            .copied()
+            .collect::<HashMap<_, _>>();
+        let accepted_request_counts = (window_start..=now_sec)
+            .map(|second| accepted_by_second.get(&second).copied().unwrap_or(0))
+            .collect();
+        let latency_samples_ms = guard
+            .completed_latencies_ms
+            .iter()
+            .filter_map(|(second, latency_ms)| (*second >= window_start).then_some(*latency_ms))
+            .collect();
+
+        LocalRequestMetricsSnapshot {
+            accepted_request_counts,
+            latency_samples_ms,
+        }
+    }
+}
+
+impl LocalRequestMetricsWindow {
+    fn prune(&mut self, now_sec: u64) {
+        let oldest_kept_second = now_sec.saturating_sub(PRETTY_LOCAL_REQUEST_WINDOW_SECS - 1);
+        while let Some((second, _)) = self.accepted_by_second.front() {
+            if *second < oldest_kept_second {
+                self.accepted_by_second.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some((second, _)) = self.completed_latencies_ms.front() {
+            if *second < oldest_kept_second {
+                self.completed_latencies_ms.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 struct MeshState {
     peers: HashMap<EndpointId, PeerInfo>,
     connections: HashMap<EndpointId, Connection>,
@@ -1025,7 +1152,9 @@ struct MeshState {
     remote_tunnel_maps: HashMap<EndpointId, HashMap<EndpointId, u16>>,
     /// Peers confirmed dead — don't reconnect from gossip discovery.
     /// Cleared when the peer successfully reconnects via rejoin/join.
-    dead_peers: std::collections::HashSet<EndpointId>,
+    /// Entries expire after [`DEAD_PEER_TTL`] so that peers recovered
+    /// on other paths can be re-learned transitively through gossip.
+    dead_peers: HashMap<EndpointId, std::time::Instant>,
     seen_plugin_messages: HashMap<String, std::time::Instant>,
     seen_plugin_message_order: VecDeque<(std::time::Instant, String)>,
     /// Last policy-rejection status per peer — used to suppress duplicate log lines.
@@ -1129,6 +1258,10 @@ pub struct TunnelChannels {
 pub struct InflightRequestGuard {
     inflight_requests: Arc<std::sync::atomic::AtomicUsize>,
     inflight_change_tx: watch::Sender<u64>,
+    local_request_metrics: Arc<LocalRequestMetricsSampler>,
+    started_at: std::time::Instant,
+    routing_metrics: crate::network::metrics::RoutingMetrics,
+    runtime_data_producer: crate::runtime_data::RuntimeDataProducer,
 }
 
 impl Drop for InflightRequestGuard {
@@ -1142,11 +1275,28 @@ impl Drop for InflightRequestGuard {
             self.inflight_requests
                 .load(std::sync::atomic::Ordering::Relaxed) as u64,
         );
+        self.local_request_metrics
+            .record_request_completed(self.started_at);
+        let current_inflight_requests =
+            self.inflight_requests
+                .load(std::sync::atomic::Ordering::Relaxed) as u64;
+        self.runtime_data_producer.publish_routing_snapshot(
+            self.routing_metrics
+                .collector_snapshot(current_inflight_requests),
+        );
     }
 }
 
 impl Node {
+    fn publish_routing_runtime_snapshot(&self) {
+        self.runtime_data_producer.publish_routing_snapshot(
+            self.routing_metrics
+                .collector_snapshot(self.inflight_requests()),
+        );
+    }
+
     pub fn begin_inflight_request(&self) -> InflightRequestGuard {
+        self.local_request_metrics.record_request_accepted();
         self.inflight_requests
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let current = self
@@ -1154,9 +1304,14 @@ impl Node {
             .load(std::sync::atomic::Ordering::Relaxed) as u64;
         let _ = self.inflight_change_tx.send(current);
         self.routing_metrics.observe_inflight(current);
+        self.publish_routing_runtime_snapshot();
         InflightRequestGuard {
             inflight_requests: self.inflight_requests.clone(),
             inflight_change_tx: self.inflight_change_tx.clone(),
+            local_request_metrics: self.local_request_metrics.clone(),
+            started_at: std::time::Instant::now(),
+            routing_metrics: self.routing_metrics.clone(),
+            runtime_data_producer: self.runtime_data_producer.clone(),
         }
     }
 
@@ -1197,6 +1352,7 @@ impl Node {
             outcome,
             completion_tokens,
         );
+        self.publish_routing_runtime_snapshot();
     }
 
     pub fn record_endpoint_attempt(
@@ -1216,6 +1372,7 @@ impl Node {
             outcome,
             completion_tokens,
         );
+        self.publish_routing_runtime_snapshot();
     }
 
     pub fn record_routed_request(
@@ -1226,8 +1383,10 @@ impl Node {
     ) {
         self.routing_metrics
             .record_request(model, attempts, outcome);
+        self.publish_routing_runtime_snapshot();
     }
 
+    #[cfg(test)]
     pub fn routing_metrics_snapshot(
         &self,
     ) -> crate::network::metrics::RoutingMetricsStatusSnapshot {
@@ -1235,10 +1394,12 @@ impl Node {
             .status_snapshot(self.inflight_requests())
     }
 
-    pub fn model_routing_metrics(
-        &self,
-    ) -> HashMap<String, crate::network::metrics::ModelRoutingMetricsSnapshot> {
-        self.routing_metrics.model_snapshots()
+    pub fn local_request_metrics_snapshot(&self) -> LocalRequestMetricsSnapshot {
+        self.local_request_metrics.snapshot()
+    }
+
+    pub(crate) fn runtime_data_collector(&self) -> crate::runtime_data::RuntimeDataCollector {
+        self.runtime_data_producer.collector()
     }
 
     pub async fn owner_summary(&self) -> OwnershipSummary {
@@ -1305,9 +1466,32 @@ impl Node {
         let endpoint = builder.bind().await?;
         // Wait briefly for relay connection so the invite token includes the relay URL.
         // On sinkholed networks this times out and we proceed without relay (direct UDP only).
-        match tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.online()).await {
-            Ok(()) => tracing::info!("Relay connected"),
-            Err(_) => tracing::warn!("Relay connection timed out (5s) — proceeding without relay"),
+        //
+        // We avoid `endpoint.online()` because iroh 0.98's implementation has a
+        // double-free in the `Flatten<IntoIter<Option<(RelayUrl, HomeRelayStatus)>>>`
+        // drop path, causing SIGABRT on some hardware (deterministically on Apple
+        // M3 Ultra / macOS 26.3).  Fixed on iroh main by PR #4149 which changed the
+        // type, but not yet released.  Instead we poll `watch_addr()` and wait until
+        // it advertises at least one relay address.
+        {
+            let mut watcher = endpoint.watch_addr();
+            let wait_relay = async {
+                loop {
+                    let addr = iroh::Watcher::get(&mut watcher);
+                    if addr.relay_urls().next().is_some() {
+                        return;
+                    }
+                    if iroh::Watcher::updated(&mut watcher).await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            };
+            match tokio::time::timeout(std::time::Duration::from_secs(5), wait_relay).await {
+                Ok(()) => tracing::info!("Relay connected"),
+                Err(_) => {
+                    tracing::warn!("Relay connection timed out (5s) — proceeding without relay")
+                }
+            }
         }
 
         // Discover public IP via STUN so the invite token includes it.
@@ -1408,6 +1592,13 @@ impl Node {
             crate::runtime::config_state::ConfigState::load(&path)?
         };
         let config_revision_init = config_state_init.revision();
+        let runtime_data_collector = crate::runtime_data::RuntimeDataCollector::new();
+        let runtime_data_producer =
+            runtime_data_collector.producer(crate::runtime_data::RuntimeDataSource {
+                scope: "routing",
+                plugin_data_key: None,
+                plugin_endpoint_key: None,
+            });
 
         let node = Node {
             endpoint,
@@ -1416,7 +1607,7 @@ impl Node {
                 peers: HashMap::new(),
                 connections: HashMap::new(),
                 remote_tunnel_maps: HashMap::new(),
-                dead_peers: std::collections::HashSet::new(),
+                dead_peers: HashMap::new(),
                 seen_plugin_messages: HashMap::new(),
                 seen_plugin_message_order: VecDeque::new(),
                 policy_rejected_peers: HashMap::new(),
@@ -1431,6 +1622,7 @@ impl Node {
             llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
+            explicit_model_interests: Arc::new(Mutex::new(Vec::new())),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),
@@ -1444,6 +1636,8 @@ impl Node {
             inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             inflight_change_tx,
             routing_metrics: crate::network::metrics::RoutingMetrics::default(),
+            local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
+            runtime_data_producer,
             tunnel_tx,
             tunnel_http_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
@@ -1498,6 +1692,12 @@ impl Node {
             .relay_mode(iroh::endpoint::RelayMode::Disabled)
             .transport_config(transport_config.clone())
             .bind()
+        let endpoint = match Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(secret_key.clone())
+            .alpns(vec![ALPN.to_vec()])
+            .relay_mode(iroh::endpoint::RelayMode::Disabled)
+            .transport_config(transport_config.clone()) 
+            .bind()
             .await
         {
             Ok(ep) => ep,
@@ -1518,8 +1718,39 @@ impl Node {
                     .context("Failed to bind iroh endpoint even on localhost")?
             }
         };
-        Ok(Node {
+
+        let (peer_change_tx, peer_change_rx) = watch::channel(0usize);
+        let (inflight_change_tx, _inflight_change_rx) = watch::channel(0u64);
+        let (tunnel_tx, tunnel_rx) = tokio::sync::mpsc::channel(256);
+        let (tunnel_http_tx, tunnel_http_rx) = tokio::sync::mpsc::channel(256);
+        let runtime_data_collector = crate::runtime_data::RuntimeDataCollector::new();
+        let runtime_data_producer =
+            runtime_data_collector.producer(crate::runtime_data::RuntimeDataSource {
+                scope: "routing",
+                plugin_data_key: None,
+                plugin_endpoint_key: None,
+            });
+
+        let _channels = TunnelChannels {
+            rpc: tunnel_rx,
+            http: tunnel_http_rx,
+        };
+        
+                Ok(Node {
             endpoint,
+            public_addr: None,
+            state: Arc::new(Mutex::new(MeshState {
+                peers: HashMap::new(),
+                connections: HashMap::new(),
+                remote_tunnel_maps: HashMap::new(),
+                dead_peers: HashMap::new(),
+                seen_plugin_messages: HashMap::new(),
+                seen_plugin_message_order: VecDeque::new(),
+                policy_rejected_peers: HashMap::new(),
+            })),
+            role: Arc::new(Mutex::new(role)),
+            // … resto de campos 
+        
             role: Arc::new(Mutex::new(role)),
             models: Arc::new(Mutex::new(Vec::new())),
             model_source: Arc::new(Mutex::new(None)),
@@ -1530,6 +1761,7 @@ impl Node {
             llama_ready: Arc::new(Mutex::new(false)),
             available_models: Arc::new(Mutex::new(Vec::new())),
             requested_models: Arc::new(Mutex::new(Vec::new())),
+            explicit_model_interests: Arc::new(Mutex::new(Vec::new())),
             model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mesh_id: Arc::new(Mutex::new(None)),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),
@@ -1543,6 +1775,8 @@ impl Node {
             inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             inflight_change_tx,
             routing_metrics: crate::network::metrics::RoutingMetrics::default(),
+            local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
+            runtime_data_producer,
             tunnel_tx,
             tunnel_http_tx,
             plugin_manager: Arc::new(Mutex::new(None)),
@@ -1980,12 +2214,12 @@ impl Node {
             // be included in split mode.
             let was_above = old_rtt.is_some_and(|r| r > MAX_SPLIT_RTT_MS);
             if was_above && rtt_ms <= MAX_SPLIT_RTT_MS {
-                eprintln!(
+                emit_mesh_info(format!(
                     "📡 Peer {} RTT improved ({}ms → {}ms) — re-electing for split",
                     id.fmt_short(),
                     old_rtt.unwrap_or(0),
                     rtt_ms
-                );
+                ));
                 let count = self.state.lock().await.peers.len();
                 let _ = self.peer_change_tx.send(count);
             }
@@ -2180,6 +2414,17 @@ impl Node {
 
     pub async fn requested_models(&self) -> Vec<String> {
         self.requested_models.lock().await.clone()
+    }
+
+    pub async fn set_explicit_model_interests(&self, mut model_refs: Vec<String>) {
+        model_refs.retain(|model_ref| !model_ref.trim().is_empty());
+        model_refs.sort();
+        model_refs.dedup();
+        *self.explicit_model_interests.lock().await = model_refs;
+    }
+
+    pub async fn explicit_model_interests(&self) -> Vec<String> {
+        self.explicit_model_interests.lock().await.clone()
     }
 
     async fn forward_plugin_event(&self, event: crate::plugin::PluginMeshEvent) -> Result<()> {
@@ -2912,9 +3157,12 @@ impl Node {
         // Don't add to peer list yet — only gossip exchange promotes to peer.
         let was_dead = {
             let mut state = self.state.lock().await;
-            let was_dead = state.dead_peers.remove(&remote);
+            let was_dead = state.dead_peers.remove(&remote).is_some();
             if was_dead {
-                eprintln!("🔄 Previously dead peer {} reconnected", remote.fmt_short());
+                emit_mesh_info(format!(
+                    "🔄 Previously dead peer {} reconnected",
+                    remote.fmt_short()
+                ));
             }
             state.connections.insert(remote, conn.clone());
             was_dead
@@ -3176,11 +3424,11 @@ impl Node {
                         // may be broken/stale while the peer is genuinely alive on
                         // a different path).
                         if recently_seen {
-                            eprintln!(
+                            emit_mesh_info(format!(
                                 "ℹ️  Peer {} reported dead by {} but seen recently (direct alive), ignoring",
                                 dead_id.fmt_short(),
                                 remote.fmt_short()
-                            );
+                            ));
                         } else {
                             let should_remove = if let Some(conn) = conn_opt {
                                 // Have a connection — probe it. Treat both
@@ -3205,11 +3453,11 @@ impl Node {
                                 {
                                     Ok(Ok(new_conn)) => {
                                         // Peer is reachable — restore connection.
-                                        eprintln!(
+                                        emit_mesh_info(format!(
                                             "ℹ️  Peer {} reported dead by {} but we reached them, keeping",
                                             dead_id.fmt_short(),
                                             remote.fmt_short()
-                                        );
+                                        ));
                                         let mut state = node.state.lock().await;
                                         // Only insert if no other task raced and
                                         // established a connection while we were probing.
@@ -3236,21 +3484,21 @@ impl Node {
                             if let Some(id) =
                                 resolve_peer_down(node.endpoint.id(), dead_id, should_remove)
                             {
-                                eprintln!(
+                                emit_mesh_warning(format!(
                                     "⚠️  Peer {} reported dead by {}, confirmed, removing",
                                     id.fmt_short(),
                                     remote.fmt_short()
-                                );
+                                ));
                                 let mut state = node.state.lock().await;
                                 state.connections.remove(&id);
                                 drop(state);
                                 node.remove_peer(id).await;
                             } else if dead_id != node.endpoint.id() {
-                                eprintln!(
+                                emit_mesh_info(format!(
                                     "ℹ️  Peer {} reported dead by {} but still reachable, ignoring",
                                     dead_id.fmt_short(),
                                     remote.fmt_short()
-                                );
+                                ));
                             }
                         }
                     });
@@ -3292,10 +3540,10 @@ impl Node {
                                 return;
                             }
                         };
-                        eprintln!(
+                        emit_mesh_info(format!(
                             "👋 Peer {} announced clean shutdown",
                             leaving_id.fmt_short()
-                        );
+                        ));
                         let mut state = node.state.lock().await;
                         state.connections.remove(&leaving_id);
                         drop(state);
@@ -3855,7 +4103,11 @@ impl Node {
             if state.peers.contains_key(&peer_id) {
                 return Ok(());
             }
-            if state.dead_peers.contains(&peer_id) {
+            if state
+                .dead_peers
+                .get(&peer_id)
+                .is_some_and(|t| t.elapsed() < DEAD_PEER_TTL)
+            {
                 tracing::debug!("Skipping connection to dead peer {}", peer_id.fmt_short());
                 return Ok(());
             }
@@ -3922,12 +4174,12 @@ impl Node {
                         };
                         let path_type = if path_info.is_ip() { "direct" } else { "relay" };
                         if rtt_ms > 0 {
-                            eprintln!(
+                            emit_mesh_info(format!(
                                 "📡 Peer {} RTT recheck: {}ms ({})",
                                 peer_id.fmt_short(),
                                 rtt_ms,
                                 path_type
-                            );
+                            ));
                             node_for_recheck.update_peer_rtt(peer_id, rtt_ms).await;
                         }
                         break;

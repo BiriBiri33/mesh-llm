@@ -6,7 +6,7 @@
 - `cmake` installed (`brew install cmake`)
 - `cargo` installed (packaged with rust)
 - `gh` CLI authenticated (`gh auth status`)
-- llama.cpp fork cloned (`just build` does this automatically)
+- patched llama.cpp checkout prepared (`just build` does this automatically)
 - `CARGO_REGISTRY_TOKEN` GitHub Actions secret configured if you want tagged stable releases to publish `mesh-llm-client` and `mesh-api` to crates.io
 
 ## Steps
@@ -17,7 +17,7 @@
 just build
 ```
 
-On macOS, this clones/updates the llama.cpp fork if needed, builds with `-DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF`, and builds the Rust mesh-llm binary. Linux release workflows build CPU, ARM64 CPU, CUDA, ROCm, and Vulkan variants separately. The Linux ARM64 CPU bundle is `mesh-llm-aarch64-unknown-linux-gnu.tar.gz`, and `arm64` and `aarch64` mean the same 64-bit ARM target in release and install docs.
+On macOS, this prepares upstream llama.cpp with the Mesh-LLM patch queue, builds with `-DGGML_METAL=ON -DGGML_RPC=ON -DBUILD_SHARED_LIBS=OFF -DLLAMA_OPENSSL=OFF`, and builds the Rust mesh-llm binary. Linux release workflows build CPU, ARM64 CPU, CUDA, ROCm, and Vulkan variants separately. The Linux ARM64 CPU bundle is `mesh-llm-aarch64-unknown-linux-gnu.tar.gz`, and `arm64` and `aarch64` mean the same 64-bit ARM target in release and install docs.
 
 On Windows, use the release-specific recipes directly:
 
@@ -31,8 +31,8 @@ just release-build-vulkan-windows
 ### 2. Verify no homebrew dependencies
 
 ```bash
-otool -L llama.cpp/build/bin/llama-server | grep -v /System | grep -v /usr/lib
-otool -L llama.cpp/build/bin/rpc-server | grep -v /System | grep -v /usr/lib
+otool -L .deps/llama.cpp/build/bin/llama-server | grep -v /System | grep -v /usr/lib
+otool -L .deps/llama.cpp/build/bin/rpc-server | grep -v /System | grep -v /usr/lib
 otool -L target/release/mesh-llm | grep -v /System | grep -v /usr/lib
 ```
 

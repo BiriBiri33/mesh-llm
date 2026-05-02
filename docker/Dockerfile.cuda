@@ -8,7 +8,7 @@
 #         docker run --rm --gpus all -p 9337:9337 -p 3131:3131 -e APP_MODE=worker -e MESH_HEADLESS=1 mesh-llm:cuda  # API-only
 #
 # IMPORTANT: -DGGML_CUDA_FA_ALL_QUANTS=ON is mandatory for correctness.
-# See ggml-org/llama.cpp#20866. Do NOT remove until fork is rebased past the fix.
+# See ggml-org/llama.cpp#20866. Do NOT remove until the patch queue is based past the fix.
 #
 # Binaries: /usr/local/lib/mesh-llm/bin/{rpc-server-cuda,llama-server-cuda,llama-moe-split}
 
@@ -87,13 +87,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake ninja-build build-essential git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN git clone -b master --depth 1 https://github.com/Mesh-LLM/llama.cpp.git
+COPY scripts/prepare-llama.sh scripts/prepare-llama.sh
+COPY third_party/llama.cpp/ third_party/llama.cpp/
+RUN scripts/prepare-llama.sh pinned
 RUN cd llama.cpp && git rev-parse HEAD > /tmp/llama-sha.txt
 # CUDA cmake flags:
 # - GGML_CUDA_FA_ALL_QUANTS=ON is MANDATORY for correctness (not perf)
 #   See ggml-org/llama.cpp#20866 — without this, asymmetric K/V quant hits
 #   BEST_FATTN_KERNEL_NONE and crashes rpc-server.
-#   Remove this flag ONLY once the fork is rebased past the upstream fix.
+#   Remove this flag ONLY once the patch queue is based past the upstream fix.
 ARG CUDA_ARCH="75;80;86;87;89;90;100;120"
 RUN cd llama.cpp && \
     cmake -B build -G Ninja \

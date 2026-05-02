@@ -29,7 +29,7 @@
 //!
 //! 1. `MESH_LLM_RUNTIME_ROOT` environment variable (highest; used by tests)
 //! 2. `$XDG_RUNTIME_DIR/mesh-llm/runtime` (systemd services, rootless containers)
-//! 3. `$HOME/.mesh-llm/runtime` (default interactive use)
+//! 3. Platform home directory (`$HOME` on Unix, Windows profile directory on Windows)
 //! 4. Fails fast with a clear error if none of the above are set
 //!
 //! # Liveness detection
@@ -59,7 +59,6 @@ use std::fs::{self, File};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Maximum bytes for argv snippet in pidfile metadata.
 pub const ARGV_SNIPPET_MAX_BYTES: usize = 256;
@@ -227,9 +226,13 @@ impl Drop for PidfileGuard {
 /// Precedence:
 /// 1. `MESH_LLM_RUNTIME_ROOT` environment variable (test override / custom deployment)
 /// 2. `$XDG_RUNTIME_DIR/mesh-llm/runtime`
-/// 3. `$HOME/.mesh-llm/runtime` (via [`dirs::home_dir`])
-/// 4. [`anyhow::bail!`] — at least one of the above must be set
+/// 3. The platform home directory from [`dirs::home_dir`]
+/// 4. [`anyhow::bail!`] - at least one of the above must be set
 pub fn runtime_root() -> Result<PathBuf> {
+    runtime_root_with_home(dirs::home_dir())
+}
+
+fn runtime_root_with_home(home: Option<PathBuf>) -> Result<PathBuf> {
     // 1. Explicit override — always wins (also used by tests to avoid touching ~)
     if let Ok(root) = std::env::var("MESH_LLM_RUNTIME_ROOT") {
         return Ok(PathBuf::from(root));
@@ -240,15 +243,16 @@ pub fn runtime_root() -> Result<PathBuf> {
         return Ok(PathBuf::from(xdg).join("mesh-llm").join("runtime"));
     }
 
-    // 3. $HOME/.mesh-llm/runtime — only when HOME env var is explicitly set
-    if std::env::var_os("HOME").is_some_and(|h| !h.is_empty()) {
-        if let Some(home) = dirs::home_dir() {
-            return Ok(home.join(".mesh-llm").join("runtime"));
-        }
+    // 3. Platform home directory. On Windows this can be available even when
+    // HOME is unset in the launching shell.
+    if let Some(home) = home {
+        return Ok(home.join(".mesh-llm").join("runtime"));
     }
 
-    // 4. Nothing usable — fail fast with a clear message
-    anyhow::bail!("mesh-llm requires HOME, XDG_RUNTIME_DIR, or MESH_LLM_RUNTIME_ROOT to be set")
+    // 4. Nothing usable - fail fast with a clear message.
+    anyhow::bail!(
+        "mesh-llm requires a home directory, XDG_RUNTIME_DIR, or MESH_LLM_RUNTIME_ROOT to be set"
+    )
 }
 
 /// A scoped runtime directory for a single mesh-llm process instance.
@@ -345,38 +349,35 @@ impl InstanceRuntime {
 /// - Returns `false` on any other error (file missing, permission denied, etc.)
 ///   to treat unknown states as "not locked" (callers must validate independently).
 ///
-/// On non-Unix platforms always returns `false`.
+/// Only Unix currently supports probing the runtime flock.
+#[cfg(unix)]
 pub fn is_locked(lock_path: &Path) -> bool {
-    #[cfg(unix)]
+    use std::os::unix::io::AsRawFd;
+
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
     {
-        use std::os::unix::io::AsRawFd;
+        Ok(f) => f,
+        Err(_) => return false,
+    };
 
-        let file = match fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(lock_path)
-        {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-
-        let fd = file.as_raw_fd();
-        // SAFETY: flock is safe to call with a valid fd
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            return err.raw_os_error() == Some(libc::EWOULDBLOCK);
-        }
-
-        drop(file);
-        false
+    let fd = file.as_raw_fd();
+    // SAFETY: flock is safe to call with a valid fd.
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        return err.raw_os_error() == Some(libc::EWOULDBLOCK);
     }
 
-    #[cfg(not(unix))]
-    {
-        let _ = lock_path;
-        false
-    }
+    // The probe acquired the lock, so release it explicitly. Dropping the file
+    // would also close the fd, but an explicit unlock keeps immediate follow-up
+    // probes deterministic in high-parallelism test runs.
+    // SAFETY: flock is safe to call with a valid fd.
+    let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
+    drop(file);
+    false
 }
 
 /// Portable process identity validation.
@@ -682,6 +683,7 @@ pub mod validate {
     /// 2. A start time within [`START_TIME_TOLERANCE_SECS`] of `expected_started_at_unix`.
     ///
     /// Returns `false` on any error or mismatch.
+    #[cfg(not(windows))]
     pub fn validate_pid_matches(
         pid: u32,
         expected_comm: &str,
@@ -733,6 +735,7 @@ pub mod reap {
     struct ScanResult {
         summary: ReapSummary,
         pending_actions: Vec<PendingAction>,
+        #[cfg(unix)]
         stale_runtime_dirs: Vec<PathBuf>,
     }
 
@@ -794,8 +797,10 @@ pub mod reap {
     #[derive(Debug, Clone, Copy, Default)]
     pub struct ReapSummary {
         /// Number of runtime directories scanned.
+        #[cfg(unix)]
         pub dirs_scanned: usize,
         /// Number of directories skipped because the owner is still alive.
+        #[cfg(unix)]
         pub dirs_skipped_alive: usize,
         /// Number of directories that were garbage collected.
         pub dirs_gc_d: usize,
@@ -824,93 +829,98 @@ pub mod reap {
             return Ok(ReapSummary::default());
         }
 
-        if !root.exists() {
-            return Ok(ReapSummary::default());
-        }
+        #[cfg(unix)]
+        {
+            if !root.exists() {
+                return Ok(ReapSummary::default());
+            }
 
-        let root = root.to_path_buf();
-        let my_runtime_dir = my_runtime_dir.to_path_buf();
-        let scan =
-            tokio::task::spawn_blocking(move || scan_cross_runtime_orphans(&root, &my_runtime_dir))
-                .await
-                .context("cross-runtime reap scan task panicked")??;
+            let root = root.to_path_buf();
+            let my_runtime_dir = my_runtime_dir.to_path_buf();
+            let scan = tokio::task::spawn_blocking(move || {
+                scan_cross_runtime_orphans(&root, &my_runtime_dir)
+            })
+            .await
+            .context("cross-runtime reap scan task panicked")??;
 
-        let mut summary = scan.summary;
-        let pending_actions = scan.pending_actions;
-        let stale_runtime_dirs = scan.stale_runtime_dirs;
-        let mut pidfiles_to_remove = Vec::new();
+            let mut summary = scan.summary;
+            let pending_actions = scan.pending_actions;
+            let stale_runtime_dirs = scan.stale_runtime_dirs;
+            let mut pidfiles_to_remove = Vec::new();
 
-        for action in &pending_actions {
-            match &action.kind {
-                PendingActionKind::KillChildAndRemovePidfile {
-                    child_pid,
-                    cmd_name,
-                    child_started_at_unix,
-                } => {
-                    // Treat 0 as "unknown start time" (detection failed at pidfile creation).
-                    let start_time_hint = if *child_started_at_unix == 0 {
-                        None
-                    } else {
-                        Some(*child_started_at_unix)
-                    };
-                    let terminated = crate::inference::launch::terminate_process(
-                        *child_pid,
+            for action in &pending_actions {
+                match &action.kind {
+                    PendingActionKind::KillChildAndRemovePidfile {
+                        child_pid,
                         cmd_name,
-                        start_time_hint,
-                    )
-                    .await;
-                    let exited = crate::inference::launch::wait_for_exit(*child_pid, 5000).await;
-                    let force_killed = if exited {
-                        false
-                    } else {
-                        crate::inference::launch::force_kill_process(
+                        child_started_at_unix,
+                    } => {
+                        // Treat 0 as "unknown start time" (detection failed at pidfile creation).
+                        let start_time_hint = if *child_started_at_unix == 0 {
+                            None
+                        } else {
+                            Some(*child_started_at_unix)
+                        };
+                        let terminated = crate::inference::launch::terminate_process(
                             *child_pid,
                             cmd_name,
                             start_time_hint,
                         )
-                        .await
-                    };
-                    let exited_after_force = if exited {
-                        true
-                    } else {
-                        crate::inference::launch::wait_for_exit(*child_pid, 5000).await
-                    };
+                        .await;
+                        let exited =
+                            crate::inference::launch::wait_for_exit(*child_pid, 5000).await;
+                        let force_killed = if exited {
+                            false
+                        } else {
+                            crate::inference::launch::force_kill_process(
+                                *child_pid,
+                                cmd_name,
+                                start_time_hint,
+                            )
+                            .await
+                        };
+                        let exited_after_force = if exited {
+                            true
+                        } else {
+                            crate::inference::launch::wait_for_exit(*child_pid, 5000).await
+                        };
 
-                    if (terminated || force_killed) && exited_after_force {
-                        summary.children_killed += 1;
+                        if (terminated || force_killed) && exited_after_force {
+                            summary.children_killed += 1;
+                            summary.pidfiles_removed += 1;
+                            pidfiles_to_remove.push(action.pidfile_path.clone());
+                        } else {
+                            tracing::warn!(
+                                pid = *child_pid,
+                                cmd_name,
+                                terminated,
+                                exited,
+                                force_killed,
+                                exited_after_force,
+                                "failed to reap orphan child; keeping pidfile"
+                            );
+                        }
+                    }
+                    PendingActionKind::RemovePidfileOnly => {
                         summary.pidfiles_removed += 1;
                         pidfiles_to_remove.push(action.pidfile_path.clone());
-                    } else {
-                        tracing::warn!(
-                            pid = *child_pid,
-                            cmd_name,
-                            terminated,
-                            exited,
-                            force_killed,
-                            exited_after_force,
-                            "failed to reap orphan child; keeping pidfile"
-                        );
                     }
                 }
-                PendingActionKind::RemovePidfileOnly => {
-                    summary.pidfiles_removed += 1;
-                    pidfiles_to_remove.push(action.pidfile_path.clone());
+            }
+
+            tokio::task::spawn_blocking(move || {
+                for path in pidfiles_to_remove {
+                    let _ = std::fs::remove_file(path);
                 }
-            }
+                for path in stale_runtime_dirs {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            })
+            .await
+            .context("cross-runtime reap cleanup task panicked")?;
+
+            Ok(summary)
         }
-
-        tokio::task::spawn_blocking(move || {
-            for path in pidfiles_to_remove {
-                let _ = std::fs::remove_file(path);
-            }
-            for path in stale_runtime_dirs {
-                let _ = std::fs::remove_dir_all(path);
-            }
-        })
-        .await
-        .context("cross-runtime reap cleanup task panicked")?;
-
-        Ok(summary)
     }
 
     /// Drain stale pidfiles from our own runtime directory.
@@ -1002,6 +1012,7 @@ pub mod reap {
         Ok(summary)
     }
 
+    #[cfg(unix)]
     fn scan_cross_runtime_orphans(
         root: &Path,
         my_runtime_dir: &Path,
@@ -1139,7 +1150,7 @@ pub mod reap {
 }
 
 /// Snapshot of a co-located mesh-llm instance discovered via the runtime root.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocalInstanceSnapshot {
     /// PID of the mesh-llm process that owns this runtime directory.
     pub pid: u32,
@@ -1167,10 +1178,12 @@ struct OwnerMetadata {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeProcessTarget {
+    pub runtime_dir: PathBuf,
     pub label: String,
     pub pid: u32,
     pub expected_comm: String,
     pub expected_start_time: Option<i64>,
+    pub is_owner: bool,
 }
 
 fn binary_process_name(binary: &str) -> Option<String> {
@@ -1228,6 +1241,7 @@ pub(crate) fn collect_runtime_stop_targets(
                 };
 
                 targets.push(RuntimeProcessTarget {
+                    runtime_dir: entry_path.clone(),
                     label: metadata.cmd_name.clone(),
                     pid: metadata.child_pid,
                     expected_comm: metadata.cmd_name,
@@ -1238,6 +1252,7 @@ pub(crate) fn collect_runtime_stop_targets(
                     } else {
                         Some(metadata.child_started_at_unix)
                     },
+                    is_owner: false,
                 });
             }
         }
@@ -1278,10 +1293,12 @@ pub(crate) fn collect_runtime_stop_targets(
             .unwrap_or_else(|| "mesh-llm".to_string());
 
         targets.push(RuntimeProcessTarget {
+            runtime_dir: entry_path,
             label: expected_comm.clone(),
             pid: owner.pid,
             expected_comm,
             expected_start_time: owner.started_at_unix,
+            is_owner: true,
         });
     }
 
@@ -1382,15 +1399,14 @@ pub async fn scan_local_instances(
 pub fn spawn_local_instance_scanner(
     root: PathBuf,
     my_pid: u32,
-    shared: Arc<tokio::sync::Mutex<Vec<LocalInstanceSnapshot>>>,
+    runtime_data_producer: crate::runtime_data::RuntimeDataProducer,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             match scan_local_instances(&root, my_pid).await {
                 Ok(instances) => {
-                    // Short lock hold — never across an await point.
-                    *shared.lock().await = instances;
+                    publish_local_instance_scan_results(&runtime_data_producer, instances);
                 }
                 Err(e) => {
                     tracing::warn!("local instance scan failed: {e}");
@@ -1398,6 +1414,13 @@ pub fn spawn_local_instance_scanner(
             }
         }
     })
+}
+
+pub(crate) fn publish_local_instance_scan_results(
+    runtime_data_producer: &crate::runtime_data::RuntimeDataProducer,
+    instances: Vec<LocalInstanceSnapshot>,
+) -> bool {
+    runtime_data_producer.replace_local_instances_snapshot(instances)
 }
 
 #[cfg(test)]
@@ -1541,6 +1564,18 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn wait_until_unlocked(lock_path: &Path) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            if !is_locked(lock_path) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        !is_locked(lock_path)
+    }
+
     #[test]
     #[serial]
     fn runtime_root_respects_env_override() {
@@ -1562,6 +1597,7 @@ mod tests {
         assert_eq!(root, dir.path().join("mesh-llm").join("runtime"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     #[serial]
     fn runtime_root_falls_back_to_home() {
@@ -1574,16 +1610,27 @@ mod tests {
         assert_eq!(root, dir.path().join(".mesh-llm").join("runtime"));
     }
 
+    #[cfg(windows)]
     #[test]
     #[serial]
-    fn runtime_root_bails_when_unset() {
-        // dirs 6.x only checks the HOME env var — no passwd fallback — so
-        // removing HOME is sufficient to make dirs::home_dir() return None.
+    fn runtime_root_falls_back_to_windows_profile_without_home() {
         let _g_mesh = EnvGuard::save_and_remove("MESH_LLM_RUNTIME_ROOT");
         let _g_xdg = EnvGuard::save_and_remove("XDG_RUNTIME_DIR");
         let _g_home = EnvGuard::save_and_remove("HOME");
 
-        let result = runtime_root();
+        let home = dirs::home_dir().expect("Windows profile directory should be available");
+        let root = runtime_root().expect("runtime_root should succeed without HOME on Windows");
+        assert_eq!(root, home.join(".mesh-llm").join("runtime"));
+    }
+
+    #[test]
+    #[serial]
+    fn runtime_root_bails_when_unset() {
+        let _g_mesh = EnvGuard::save_and_remove("MESH_LLM_RUNTIME_ROOT");
+        let _g_xdg = EnvGuard::save_and_remove("XDG_RUNTIME_DIR");
+        let _g_home = EnvGuard::save_and_remove("HOME");
+
+        let result = runtime_root_with_home(None);
         assert!(
             result.is_err(),
             "runtime_root must bail when no path source is set"
@@ -1618,6 +1665,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(unix)]
     fn acquire_holds_flock() {
         let dir = tempdir().unwrap();
         let _g = EnvGuard::save_and_set("MESH_LLM_RUNTIME_ROOT", dir.path().to_str().unwrap());
@@ -1633,7 +1681,7 @@ mod tests {
         drop(rt);
 
         assert!(
-            !is_locked(&lock_path),
+            wait_until_unlocked(&lock_path),
             "lock file must be released after InstanceRuntime is dropped"
         );
     }
@@ -1654,6 +1702,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(unix)]
     fn is_locked_returns_true_while_held() {
         let dir = tempdir().unwrap();
         let _g = EnvGuard::save_and_set("MESH_LLM_RUNTIME_ROOT", dir.path().to_str().unwrap());
@@ -1669,6 +1718,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(unix)]
     fn is_locked_returns_false_after_drop() {
         let dir = tempdir().unwrap();
         let _g = EnvGuard::save_and_set("MESH_LLM_RUNTIME_ROOT", dir.path().to_str().unwrap());
@@ -1679,7 +1729,7 @@ mod tests {
         drop(rt);
 
         assert!(
-            !is_locked(&lock_path),
+            wait_until_unlocked(&lock_path),
             "is_locked must return false after InstanceRuntime is dropped"
         );
     }
@@ -1955,6 +2005,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn validate_pid_matches_rejects_wrong_comm() {
         let pid = std::process::id();
         assert!(
@@ -1964,6 +2015,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn validate_pid_matches_rejects_wrong_start_time() {
         let pid = std::process::id();
         let comm = match validate::process_comm(pid).ok().flatten() {
@@ -1994,6 +2046,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn validate_pid_matches_accepts_within_tolerance() {
         let pid = std::process::id();
         let comm = match validate::process_comm(pid).ok().flatten() {
@@ -2012,6 +2065,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn validate_pid_matches_rejects_outside_tolerance() {
         let pid = std::process::id();
         let comm = match validate::process_comm(pid).ok().flatten() {
@@ -2111,6 +2165,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    #[cfg(unix)]
     async fn reap_skips_own_dir() {
         let root = tempdir().unwrap();
         let dir_a = root.path().join("1001");
@@ -2131,6 +2186,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    #[cfg(unix)]
     async fn reap_skips_alive_owner() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::save_and_set("MESH_LLM_RUNTIME_ROOT", root.path().to_str().unwrap());
@@ -2153,6 +2209,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    #[cfg(unix)]
     async fn reap_removes_dead_child_pidfile() {
         let root = tempdir().unwrap();
         let peer_dir = root.path().join("50001");
@@ -2186,6 +2243,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    #[cfg(unix)]
     async fn reap_preserves_external_pid_via_comm_mismatch() {
         let root = tempdir().unwrap();
         let peer_dir = root.path().join("60001");
@@ -2250,6 +2308,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    #[cfg(unix)]
     async fn cross_runtime_reaper_ignores_non_directories() {
         let root = tempdir().unwrap();
         let my_dir = root.path().join("self");

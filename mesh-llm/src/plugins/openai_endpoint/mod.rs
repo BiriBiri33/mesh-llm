@@ -3,18 +3,18 @@ use mesh_llm_plugin::{
     capability, plugin_server_info, PluginMetadata, PluginRuntime, PluginStartupPolicy,
 };
 
-const DEFAULT_LEMONADE_BASE_URL: &str = "http://localhost:8000/api/v1";
+const DEFAULT_BASE_URL: &str = "http://localhost:8000/v1";
 
-fn lemonade_base_url() -> String {
-    std::env::var("MESH_LLM_LEMONADE_BASE_URL")
+fn base_url() -> String {
+    std::env::var("MESH_LLM_OPENAI_ENDPOINT_URL")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_LEMONADE_BASE_URL.to_string())
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
 }
 
-fn build_lemonade_plugin(name: String) -> mesh_llm_plugin::SimplePlugin {
-    let base_url = lemonade_base_url();
+fn build_plugin(name: String) -> mesh_llm_plugin::SimplePlugin {
+    let base_url = base_url();
     let health_url = base_url.clone();
 
     mesh_llm_plugin::plugin! {
@@ -22,12 +22,13 @@ fn build_lemonade_plugin(name: String) -> mesh_llm_plugin::SimplePlugin {
             name,
             crate::VERSION,
             plugin_server_info(
-                "mesh-lemonade",
+                "mesh-openai-endpoint",
                 crate::VERSION,
-                "Lemonade Endpoint Plugin",
-                "Registers a local Lemonade OpenAI-compatible inference endpoint.",
+                "OpenAI-Compatible Endpoint Plugin",
+                "Routes inference to an external OpenAI-compatible server (vLLM, TGI, Ollama, etc.).",
                 Some(
-                    "Exposes a local OpenAI-compatible inference endpoint to mesh-llm when enabled.",
+                    "Set MESH_LLM_OPENAI_ENDPOINT_URL to point at any server \
+                     that speaks the OpenAI /v1/chat/completions API.",
                 ),
             ),
         ),
@@ -37,7 +38,7 @@ fn build_lemonade_plugin(name: String) -> mesh_llm_plugin::SimplePlugin {
             capability("endpoint:inference/openai_compatible"),
         ],
         inference: [
-            mesh_llm_plugin::inference::openai_http("lemonade", base_url.clone())
+            mesh_llm_plugin::inference::openai_http("openai-endpoint", base_url.clone())
                 .managed_by_plugin(false),
         ],
         health: move |_context| {
@@ -48,5 +49,5 @@ fn build_lemonade_plugin(name: String) -> mesh_llm_plugin::SimplePlugin {
 }
 
 pub(crate) async fn run_plugin(name: String) -> Result<()> {
-    PluginRuntime::run(build_lemonade_plugin(name)).await
+    PluginRuntime::run(build_plugin(name)).await
 }

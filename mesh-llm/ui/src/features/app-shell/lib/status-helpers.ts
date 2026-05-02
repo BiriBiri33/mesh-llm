@@ -9,6 +9,8 @@ import type {
 } from "./status-types";
 import type { TopologyNode } from "./topology-types";
 
+type GpuInventory = Array<{ vram_bytes: number }>;
+
 export function modelDisplayName(model?: MeshModel | null) {
   if (!model) return "";
   return model.display_name || model.name;
@@ -48,6 +50,24 @@ export function overviewVramGb(isClient: boolean, vramGb?: number | null) {
   return Math.max(0, vramGb || 0);
 }
 
+export function gpuInventoryVramGb(gpus?: GpuInventory | null) {
+  const bytes =
+    gpus?.reduce((sum, gpu) => {
+      const vramBytes = Number(gpu.vram_bytes);
+      return sum + (Number.isFinite(vramBytes) && vramBytes > 0 ? vramBytes : 0);
+    }, 0) ?? 0;
+  return bytes > 0 ? bytes / 1024 ** 3 : null;
+}
+
+export function displayVramGb(
+  isClient: boolean,
+  capacityVramGb?: number | null,
+  gpus?: GpuInventory | null,
+) {
+  if (isClient) return 0;
+  return gpuInventoryVramGb(gpus) ?? overviewVramGb(false, capacityVramGb);
+}
+
 function assertLiveNodeState(state: LiveNodeState | undefined | null): LiveNodeState | null {
   if (!state || !(state in LIVE_NODE_STATE_LABELS)) {
     console.warn("Invalid or missing live node state:", state);
@@ -65,9 +85,9 @@ export function formatLiveNodeState(state: LiveNodeState | undefined | null): st
 export function meshGpuVram(status: StatusPayload | null) {
   if (!status) return 0;
   return (
-    overviewVramGb(status.node_state === "client", status.my_vram_gb) +
+    displayVramGb(status.node_state === "client", status.my_vram_gb, status.gpus) +
     (status.peers || []).reduce(
-      (sum, peer) => sum + overviewVramGb(peer.state === "client", peer.vram_gb),
+      (sum, peer) => sum + displayVramGb(peer.state === "client", peer.vram_gb, peer.gpus),
       0,
     )
   );

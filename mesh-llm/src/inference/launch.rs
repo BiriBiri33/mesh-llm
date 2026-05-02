@@ -4,11 +4,15 @@
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
+use reqwest::StatusCode;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::process::Command;
+
+use crate::cli::output::{emit_event, OutputEvent};
 
 /// llama.cpp split mode for distributing tensors across devices.
 ///
@@ -81,6 +85,13 @@ impl BinaryFlavor {
 struct ResolvedBinary {
     path: PathBuf,
     flavor: Option<BinaryFlavor>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BinaryBackendDeviceProbe {
+    pub(crate) path: PathBuf,
+    pub(crate) flavor: Option<BinaryFlavor>,
+    pub(crate) available_devices: Vec<String>,
 }
 
 pub(crate) fn platform_bin_name(name: &str) -> String {
@@ -211,6 +222,146 @@ fn resolve_binary_path(
     }
 }
 
+pub(crate) fn resolve_binary_flavor(
+    bin_dir: &Path,
+    name: &str,
+    requested_flavor: Option<BinaryFlavor>,
+) -> Result<Option<BinaryFlavor>> {
+    resolve_binary_path(bin_dir, name, requested_flavor).map(|binary| binary.flavor)
+}
+
+pub(crate) fn probe_backend_devices_for_binary(
+    bin_dir: &Path,
+    name: &str,
+    requested_flavor: Option<BinaryFlavor>,
+) -> Result<BinaryBackendDeviceProbe> {
+    let binary = resolve_binary_path(bin_dir, name, requested_flavor)?;
+    let available_devices = probe_available_devices(&binary.path);
+    Ok(BinaryBackendDeviceProbe {
+        path: binary.path,
+        flavor: binary.flavor,
+        available_devices,
+    })
+}
+
+pub(crate) fn resolve_requested_device_from_available(
+    available: &[String],
+    binary: &Path,
+    requested: &str,
+) -> Result<String> {
+    if !available.is_empty() {
+        if available.iter().any(|candidate| candidate == requested) {
+            return Ok(requested.to_string());
+        }
+
+        // Dual support for ROCm/HIP transition.
+        let is_amd_requested = requested.starts_with("ROCm") || requested.starts_with("HIP");
+        if is_amd_requested {
+            let alt_device = if requested.starts_with("ROCm") {
+                requested.replace("ROCm", "HIP")
+            } else {
+                requested.replace("HIP", "ROCm")
+            };
+            if available.iter().any(|candidate| candidate == &alt_device) {
+                return Ok(alt_device);
+            }
+        }
+
+        anyhow::bail!(
+            "requested device {requested} is not supported by {}. Available devices: {}",
+            binary.display(),
+            available.join(", ")
+        );
+    }
+
+    Ok(requested.to_string())
+}
+
+pub(crate) fn backend_device_for_flavor(
+    index: usize,
+    binary_flavor: BinaryFlavor,
+) -> Option<String> {
+    match binary_flavor {
+        BinaryFlavor::Cpu => None,
+        BinaryFlavor::Cuda => Some(format!("CUDA{index}")),
+        BinaryFlavor::Rocm => Some(format!("ROCm{index}")),
+        BinaryFlavor::Vulkan => Some(format!("Vulkan{index}")),
+        BinaryFlavor::Metal => Some(format!("MTL{index}")),
+    }
+}
+
+fn child_library_search_paths(binary_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(parent) = binary_path.parent() {
+        paths.push(parent.to_path_buf());
+    }
+    paths.extend(platform_runtime_library_paths());
+    paths
+}
+
+#[cfg(windows)]
+fn platform_runtime_library_paths() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(cuda_path) = std::env::var_os("CUDA_PATH").filter(|value| !value.is_empty()) {
+        roots.push(PathBuf::from(cuda_path));
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles").filter(|value| !value.is_empty())
+    {
+        let toolkit_root = PathBuf::from(program_files)
+            .join("NVIDIA GPU Computing Toolkit")
+            .join("CUDA");
+        if let Ok(entries) = std::fs::read_dir(toolkit_root) {
+            let mut discovered = entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| match entry.file_type() {
+                    Ok(file_type) if file_type.is_dir() => Some(entry.path()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            discovered.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            roots.extend(discovered);
+        }
+    }
+
+    let mut paths = Vec::new();
+    for root in roots {
+        paths.push(root.join("bin"));
+        paths.push(root.join("bin").join("x64"));
+    }
+    paths
+}
+
+#[cfg(not(windows))]
+fn platform_runtime_library_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn prepend_child_library_paths(command: &mut Command, binary_path: &Path) {
+    let mut paths = child_library_search_paths(binary_path);
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+
+    paths.retain(|path| path.exists());
+    dedup_paths(&mut paths);
+
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command.env("PATH", joined);
+    }
+}
+
+fn dedup_paths(paths: &mut Vec<PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| {
+        let key = path.to_string_lossy();
+        #[cfg(windows)]
+        let key = key.to_ascii_lowercase();
+        #[cfg(not(windows))]
+        let key = key.to_string();
+        seen.insert(key)
+    });
+}
+
 #[derive(Debug)]
 pub struct InferenceServerHandle {
     pid: u32,
@@ -328,9 +479,24 @@ pub struct ModelLaunchSpec<'a> {
     /// Number of parallel slots for llama-server (`--parallel`).
     /// Set from the `[[models]].slots` TOML config; defaults to 4 when unset.
     pub slots: usize,
+    pub runtime_data_producer: Option<crate::runtime_data::RuntimeDataProducer>,
 }
 
 pub(crate) const GB: u64 = 1_000_000_000;
+
+static RUNTIME_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn mark_runtime_shutting_down() {
+    RUNTIME_SHUTTING_DOWN.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn clear_runtime_shutting_down() {
+    RUNTIME_SHUTTING_DOWN.store(false, Ordering::Relaxed);
+}
+
+pub(crate) fn runtime_shutting_down() -> bool {
+    RUNTIME_SHUTTING_DOWN.load(Ordering::Relaxed)
+}
 
 fn spawned_binary_name(path: &Path) -> String {
     #[cfg(windows)]
@@ -346,6 +512,17 @@ fn spawned_binary_name(path: &Path) -> String {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned())
     }
+}
+
+fn model_label(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    crate::models::local::split_gguf_base_name(&stem)
+        .unwrap_or(stem.as_str())
+        .to_string()
 }
 
 fn compute_context_size(
@@ -681,31 +858,7 @@ fn resolve_device_for_binary(
     let available = probe_available_devices(binary);
 
     if let Some(device) = requested {
-        if !available.is_empty() {
-            if available.iter().any(|candidate| candidate == device) {
-                return Ok(device.to_string());
-            }
-
-            // Dual support for ROCm/HIP transition
-            let is_amd_requested = device.starts_with("ROCm") || device.starts_with("HIP");
-            if is_amd_requested {
-                let alt_device = if device.starts_with("ROCm") {
-                    device.replace("ROCm", "HIP")
-                } else {
-                    device.replace("HIP", "ROCm")
-                };
-                if available.iter().any(|candidate| candidate == &alt_device) {
-                    return Ok(alt_device);
-                }
-            }
-
-            anyhow::bail!(
-                "requested device {device} is not supported by {}. Available devices: {}",
-                binary.display(),
-                available.join(", ")
-            );
-        }
-        return Ok(device.to_string());
+        return resolve_requested_device_from_available(&available, binary, device);
     }
 
     if let Some(selected) = preferred_device(&available, flavor) {
@@ -782,16 +935,17 @@ pub async fn start_rpc_server(
     };
     let startup_polls = (startup_timeout.as_millis() / 500) as usize;
 
-    tracing::info!("Starting rpc-server on :{port} (device: {device})");
-
     let rpc_log = runtime.log_path(&format!("rpc-server-{port}"));
-    eprintln!(
-        "⏳ Starting rpc-server on port {port}... (logs: {})",
-        rpc_log.display()
-    );
     let rpc_log_file = std::fs::File::create(&rpc_log)
         .with_context(|| format!("Failed to create rpc-server log file {}", rpc_log.display()))?;
     let rpc_log_file2 = rpc_log_file.try_clone()?;
+
+    tracing::info!("Starting rpc-server on :{port} (device: {device})");
+    let _ = emit_event(OutputEvent::RpcServerStarting {
+        port,
+        device: device.clone(),
+        log_path: Some(rpc_log.display().to_string()),
+    });
 
     let mut args = vec![
         "-d".to_string(),
@@ -808,7 +962,8 @@ pub async fn start_rpc_server(
         );
     }
 
-    let mut child = Command::new(&rpc_server.path)
+    let mut command = Command::new(&rpc_server.path);
+    command
         .args(&args)
         .env("MESH_LLM_OWNER_PID", std::process::id().to_string())
         .env(
@@ -816,14 +971,15 @@ pub async fn start_rpc_server(
             runtime.dir().to_string_lossy().to_string(),
         )
         .stdout(std::process::Stdio::from(rpc_log_file))
-        .stderr(std::process::Stdio::from(rpc_log_file2))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "Failed to start rpc-server at {}",
-                rpc_server.path.display()
-            )
-        })?;
+        .stderr(std::process::Stdio::from(rpc_log_file2));
+    prepend_child_library_paths(&mut command, &rpc_server.path);
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "Failed to start rpc-server at {}",
+            rpc_server.path.display()
+        )
+    })?;
 
     let pid = child.id().context("rpc-server did not expose a PID")?;
     if pid == 0 {
@@ -853,12 +1009,21 @@ pub async fn start_rpc_server(
     for _ in 0..startup_polls {
         if is_port_open(port).await {
             let pidfile_path = runtime.pidfile_path(&format!("rpc-server-{port}"));
+            let device_for_spawn = device.clone();
             tokio::spawn(async move {
                 let _ = child.wait().await;
                 let _ = std::fs::remove_file(&pidfile_path);
-                if !expected_exit_clone.load(Ordering::Relaxed) {
-                    eprintln!("⚠️  rpc-server process exited unexpectedly");
+                if !expected_exit_clone.load(Ordering::Relaxed) && !runtime_shutting_down() {
+                    let _ = emit_event(OutputEvent::Warning {
+                        message: "rpc-server process exited unexpectedly".to_string(),
+                        context: Some(format!("port={port} device={device_for_spawn}")),
+                    });
                 }
+            });
+            let _ = emit_event(OutputEvent::RpcReady {
+                port,
+                device: device.clone(),
+                log_path: Some(rpc_log.display().to_string()),
             });
             return Ok(RpcServerHandle {
                 pid,
@@ -909,7 +1074,9 @@ pub(crate) enum ProcessSignal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SignalOutcome {
     Sent,
+    #[cfg(not(windows))]
     AlreadyDead,
+    #[cfg(not(windows))]
     Skipped,
     Failed,
 }
@@ -944,6 +1111,7 @@ fn send_signal_if_matches(
 
     #[cfg(windows)]
     {
+        let _ = expected_start_time;
         tracing::debug!(
             pid,
             expected_comm,
@@ -999,11 +1167,50 @@ fn send_signal_if_matches(
     }
 }
 
+/// Outcome of [`terminate_process_blocking`].
+///
+/// Callers can use [`TerminationOutcome::is_success`] for a coarse success/failure
+/// check equivalent to the old `bool` return, or match on individual variants when
+/// the distinction matters (e.g. deciding whether a runtime had a chance to clean up
+/// its children).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminationOutcome {
+    /// Process was already gone before we attempted to signal it.
+    NotRunning,
+    /// Process exited after SIGTERM, before kill escalation.
+    Graceful,
+    /// Process did not exit within the grace period and had to be SIGKILL'd.
+    Killed,
+    /// Signal call itself failed (e.g. identity mismatch or OS error).
+    Failed,
+}
+
+impl TerminationOutcome {
+    /// Returns `true` for any outcome where the process is no longer running.
+    ///
+    /// Equivalent to the old `bool` return from `terminate_process_blocking`:
+    /// `NotRunning | Graceful | Killed` → `true`, `Failed` → `false`.
+    pub(crate) fn is_success(self) -> bool {
+        !matches!(self, TerminationOutcome::Failed)
+    }
+}
+
+/// Attempts to terminate a process identified by `pid`, with identity validation
+/// and graceful-then-forceful signal escalation.
+///
+/// Returns a [`TerminationOutcome`] describing how the process was stopped:
+/// - [`TerminationOutcome::NotRunning`] — process was already dead.
+/// - [`TerminationOutcome::Graceful`] — process exited after SIGTERM within the grace period.
+/// - [`TerminationOutcome::Killed`] — process required SIGKILL after the grace period.
+/// - [`TerminationOutcome::Failed`] — could not signal the process (identity mismatch or OS error).
+///
+/// Sends SIGTERM first, then waits up to 5 s (20 × 250 ms). If the process is
+/// still alive, escalates to SIGKILL.
 pub(crate) fn terminate_process_blocking(
     pid: u32,
     expected_comm: &str,
     expected_start_time: Option<i64>,
-) -> bool {
+) -> TerminationOutcome {
     match send_signal_if_matches(
         pid,
         expected_comm,
@@ -1011,10 +1218,13 @@ pub(crate) fn terminate_process_blocking(
         ProcessSignal::Terminate,
     ) {
         SignalOutcome::Sent => {}
-        SignalOutcome::AlreadyDead => return true,
+        #[cfg(not(windows))]
+        SignalOutcome::AlreadyDead => return TerminationOutcome::NotRunning,
         // Identity mismatch: the PID belongs to a different process; do not
         // claim a successful stop.
-        SignalOutcome::Skipped | SignalOutcome::Failed => return false,
+        #[cfg(not(windows))]
+        SignalOutcome::Skipped => return TerminationOutcome::Failed,
+        SignalOutcome::Failed => return TerminationOutcome::Failed,
     }
 
     for _ in 0..20 {
@@ -1022,14 +1232,16 @@ pub(crate) fn terminate_process_blocking(
         if crate::runtime::instance::validate::process_liveness(pid)
             == crate::runtime::instance::validate::Liveness::Dead
         {
-            return true;
+            return TerminationOutcome::Graceful;
         }
     }
 
-    matches!(
-        send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Kill),
-        SignalOutcome::Sent | SignalOutcome::AlreadyDead
-    )
+    match send_signal_if_matches(pid, expected_comm, expected_start_time, ProcessSignal::Kill) {
+        SignalOutcome::Sent => TerminationOutcome::Killed,
+        #[cfg(not(windows))]
+        SignalOutcome::AlreadyDead => TerminationOutcome::Graceful,
+        _ => TerminationOutcome::Failed,
+    }
 }
 
 async fn terminate_process_with_wait(
@@ -1046,7 +1258,9 @@ async fn terminate_process_with_wait(
         ProcessSignal::Terminate,
     ) {
         SignalOutcome::Sent => {}
-        SignalOutcome::AlreadyDead | SignalOutcome::Skipped | SignalOutcome::Failed => return,
+        #[cfg(not(windows))]
+        SignalOutcome::AlreadyDead | SignalOutcome::Skipped => return,
+        SignalOutcome::Failed => return,
     }
 
     for _ in 0..attempts {
@@ -1089,6 +1303,7 @@ pub async fn start_llama_server(
     let total_group_vram = spec.total_group_vram;
     let selected_gpu = spec.selected_gpu;
     let slots = spec.slots;
+    let runtime_data_producer = spec.runtime_data_producer;
     let llama_server = resolve_binary_path(bin_dir, "llama-server", binary_flavor)?;
 
     anyhow::ensure!(model.exists(), "Model not found at {}", model.display());
@@ -1107,10 +1322,6 @@ pub async fn start_llama_server(
     );
 
     let llama_log = runtime.log_path(&format!("llama-server-{}", http_port));
-    eprintln!(
-        "⏳ Starting llama-server on :{http_port}... (logs: {})",
-        llama_log.display()
-    );
     let log_file = std::fs::File::create(&llama_log).with_context(|| {
         format!(
             "Failed to create llama-server log file {}",
@@ -1141,6 +1352,12 @@ pub async fn start_llama_server(
     ensure_selected_gpu_capacity(selected_gpu, host_model_bytes, "this local launch")?;
     let vram_after_model = my_vram.saturating_sub(host_model_bytes);
     let ctx_size = compute_context_size(ctx_size_override, model_bytes, my_vram, total_group_vram);
+    let _ = emit_event(OutputEvent::LlamaStarting {
+        model: Some(model_label(model)),
+        http_port,
+        ctx_size: Some(ctx_size),
+        log_path: Some(llama_log.display().to_string()),
+    });
     tracing::info!(
         "Context size: {ctx_size} tokens (model {:.1}GB, host weights ~{:.1}GB, {:.0}GB capacity, {:.1}GB free{})",
         model_bytes as f64 / GB as f64,
@@ -1179,6 +1396,7 @@ pub async fn start_llama_server(
         "0.0.0.0".to_string(),
         "--port".to_string(),
         http_port.to_string(),
+        "--metrics".to_string(),
         "-c".to_string(),
         ctx_size.to_string(),
         // Use deepseek format: thinking goes into reasoning_content field.
@@ -1323,7 +1541,8 @@ pub async fn start_llama_server(
             tracing::warn!("mmproj not found at {}, skipping vision", proj.display());
         }
     }
-    let mut child = Command::new(&llama_server.path)
+    let mut command = Command::new(&llama_server.path);
+    command
         .args(&args)
         .env("MESH_LLM_OWNER_PID", std::process::id().to_string())
         .env(
@@ -1331,14 +1550,15 @@ pub async fn start_llama_server(
             runtime.dir().to_string_lossy().to_string(),
         )
         .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file2))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "Failed to start llama-server at {}",
-                llama_server.path.display()
-            )
-        })?;
+        .stderr(std::process::Stdio::from(log_file2));
+    prepend_child_library_paths(&mut command, &llama_server.path);
+
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "Failed to start llama-server at {}",
+            llama_server.path.display()
+        )
+    })?;
 
     // Wait for health check — scale timeout by model size so large MoE shards
     // don't hit a fixed ceiling. 120s per GB gives plenty of headroom for slow
@@ -1421,11 +1641,23 @@ pub async fn start_llama_server(
             };
             let (death_tx, death_rx) = tokio::sync::oneshot::channel();
             let pidfile_path = runtime.pidfile_path(&format!("llama-server-{}", http_port));
+            let launched_model_label = model_label(model);
+            if let Some(runtime_data_producer) = runtime_data_producer {
+                spawn_llama_runtime_poller(
+                    pid,
+                    http_port,
+                    expected_exit.clone(),
+                    runtime_data_producer,
+                );
+            }
             tokio::spawn(async move {
                 let _ = child.wait().await;
                 let _ = std::fs::remove_file(&pidfile_path);
-                if !expected_exit.load(Ordering::Relaxed) {
-                    eprintln!("⚠️  llama-server process exited unexpectedly");
+                if !expected_exit.load(Ordering::Relaxed) && !runtime_shutting_down() {
+                    let _ = emit_event(OutputEvent::Warning {
+                        message: "llama-server process exited unexpectedly".to_string(),
+                        context: Some(format!("model={launched_model_label} port={http_port}")),
+                    });
                 }
                 let _ = death_tx.send(());
             });
@@ -1593,6 +1825,545 @@ fn command_succeeds(command: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+fn spawn_llama_runtime_poller(
+    pid: u32,
+    http_port: u16,
+    expected_exit: Arc<AtomicBool>,
+    runtime_data_producer: crate::runtime_data::RuntimeDataProducer,
+) {
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(port = http_port, error = %err, "failed to build llama runtime poll client");
+                return;
+            }
+        };
+
+        poll_llama_metrics_once(&client, http_port, &runtime_data_producer).await;
+        poll_llama_slots_once(&client, http_port, &runtime_data_producer).await;
+
+        let mut metrics_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut slots_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        metrics_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        slots_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let _ = metrics_interval.tick().await;
+        let _ = slots_interval.tick().await;
+
+        loop {
+            if should_stop_llama_runtime_poller(pid, &expected_exit) {
+                publish_llama_runtime_unavailable(
+                    &runtime_data_producer,
+                    Some("llama-server not running".into()),
+                );
+                break;
+            }
+
+            tokio::select! {
+                _ = metrics_interval.tick() => {
+                    poll_llama_metrics_once(&client, http_port, &runtime_data_producer).await;
+                }
+                _ = slots_interval.tick() => {
+                    poll_llama_slots_once(&client, http_port, &runtime_data_producer).await;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+        }
+    });
+}
+
+fn should_stop_llama_runtime_poller(pid: u32, expected_exit: &AtomicBool) -> bool {
+    expected_exit.load(Ordering::Relaxed)
+        || crate::runtime::instance::validate::process_liveness(pid)
+            == crate::runtime::instance::validate::Liveness::Dead
+}
+
+pub(crate) async fn poll_llama_metrics_once(
+    client: &reqwest::Client,
+    http_port: u16,
+    runtime_data_producer: &crate::runtime_data::RuntimeDataProducer,
+) {
+    let url = format!("http://127.0.0.1:{http_port}/metrics");
+    let attempted_at = now_unix_ms();
+    let snapshot = match client.get(&url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            if !status.is_success() {
+                let current = runtime_data_producer
+                    .collector()
+                    .runtime_llama_snapshot()
+                    .metrics;
+                runtime_metrics_failure_snapshot(
+                    classify_runtime_endpoint_status(status),
+                    attempted_at,
+                    Some(format!("HTTP {}", status.as_u16())),
+                    current,
+                )
+            } else {
+                match read_limited_response_text(response, LLAMA_METRICS_RESPONSE_MAX_BYTES).await {
+                    Ok(raw_text) => crate::runtime_data::RuntimeLlamaMetricsSnapshot {
+                        status: crate::runtime_data::RuntimeLlamaEndpointStatus::Ready,
+                        last_attempt_unix_ms: Some(attempted_at),
+                        last_success_unix_ms: Some(attempted_at),
+                        error: None,
+                        raw_text: Some(permitted_llama_metrics_raw_text(&raw_text)),
+                        samples: parse_prometheus_samples(&raw_text),
+                    },
+                    Err(err) => {
+                        let current = runtime_data_producer
+                            .collector()
+                            .runtime_llama_snapshot()
+                            .metrics;
+                        runtime_metrics_failure_snapshot(
+                            crate::runtime_data::RuntimeLlamaEndpointStatus::Error,
+                            attempted_at,
+                            Some(err),
+                            current,
+                        )
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            let current = runtime_data_producer
+                .collector()
+                .runtime_llama_snapshot()
+                .metrics;
+            runtime_metrics_failure_snapshot(
+                crate::runtime_data::RuntimeLlamaEndpointStatus::Unavailable,
+                attempted_at,
+                Some(err.to_string()),
+                current,
+            )
+        }
+    };
+
+    if snapshot.status != crate::runtime_data::RuntimeLlamaEndpointStatus::Ready {
+        tracing::debug!(port = http_port, error = ?snapshot.error, "llama /metrics polling unavailable");
+    }
+    runtime_data_producer.publish_llama_metrics_snapshot(snapshot);
+}
+
+pub(crate) async fn poll_llama_slots_once(
+    client: &reqwest::Client,
+    http_port: u16,
+    runtime_data_producer: &crate::runtime_data::RuntimeDataProducer,
+) {
+    let url = format!("http://127.0.0.1:{http_port}/slots");
+    let attempted_at = now_unix_ms();
+    let snapshot = match client.get(&url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            if !status.is_success() {
+                let current = runtime_data_producer
+                    .collector()
+                    .runtime_llama_snapshot()
+                    .slots;
+                runtime_slots_failure_snapshot(
+                    classify_runtime_endpoint_status(status),
+                    attempted_at,
+                    Some(format!("HTTP {}", status.as_u16())),
+                    current,
+                )
+            } else {
+                match read_limited_response_json(response, LLAMA_SLOTS_RESPONSE_MAX_BYTES).await {
+                    Ok(json) => match parse_llama_slots(&json) {
+                        Ok(slots) => crate::runtime_data::RuntimeLlamaSlotsSnapshot {
+                            status: crate::runtime_data::RuntimeLlamaEndpointStatus::Ready,
+                            last_attempt_unix_ms: Some(attempted_at),
+                            last_success_unix_ms: Some(attempted_at),
+                            error: None,
+                            slots,
+                        },
+                        Err(err) => {
+                            let current = runtime_data_producer
+                                .collector()
+                                .runtime_llama_snapshot()
+                                .slots;
+                            runtime_slots_failure_snapshot(
+                                crate::runtime_data::RuntimeLlamaEndpointStatus::Error,
+                                attempted_at,
+                                Some(err),
+                                current,
+                            )
+                        }
+                    },
+                    Err(err) => {
+                        let current = runtime_data_producer
+                            .collector()
+                            .runtime_llama_snapshot()
+                            .slots;
+                        runtime_slots_failure_snapshot(
+                            crate::runtime_data::RuntimeLlamaEndpointStatus::Error,
+                            attempted_at,
+                            Some(err.to_string()),
+                            current,
+                        )
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            let current = runtime_data_producer
+                .collector()
+                .runtime_llama_snapshot()
+                .slots;
+            runtime_slots_failure_snapshot(
+                crate::runtime_data::RuntimeLlamaEndpointStatus::Unavailable,
+                attempted_at,
+                Some(err.to_string()),
+                current,
+            )
+        }
+    };
+
+    if snapshot.status != crate::runtime_data::RuntimeLlamaEndpointStatus::Ready {
+        tracing::debug!(port = http_port, error = ?snapshot.error, "llama /slots polling unavailable");
+    }
+    runtime_data_producer.publish_llama_slots_snapshot(snapshot);
+}
+
+fn publish_llama_runtime_unavailable(
+    runtime_data_producer: &crate::runtime_data::RuntimeDataProducer,
+    error: Option<String>,
+) {
+    let now = now_unix_ms();
+    let current = runtime_data_producer.collector().runtime_llama_snapshot();
+    runtime_data_producer.publish_llama_metrics_snapshot(runtime_metrics_failure_snapshot(
+        crate::runtime_data::RuntimeLlamaEndpointStatus::Unavailable,
+        now,
+        error.clone(),
+        current.metrics,
+    ));
+    runtime_data_producer.publish_llama_slots_snapshot(runtime_slots_failure_snapshot(
+        crate::runtime_data::RuntimeLlamaEndpointStatus::Unavailable,
+        now,
+        error,
+        current.slots,
+    ));
+}
+
+fn runtime_metrics_failure_snapshot(
+    status: crate::runtime_data::RuntimeLlamaEndpointStatus,
+    attempted_at: u64,
+    error: Option<String>,
+    current: crate::runtime_data::RuntimeLlamaMetricsSnapshot,
+) -> crate::runtime_data::RuntimeLlamaMetricsSnapshot {
+    crate::runtime_data::RuntimeLlamaMetricsSnapshot {
+        status,
+        last_attempt_unix_ms: Some(attempted_at),
+        last_success_unix_ms: current.last_success_unix_ms,
+        error,
+        raw_text: current.raw_text,
+        samples: current.samples,
+    }
+}
+
+fn runtime_slots_failure_snapshot(
+    status: crate::runtime_data::RuntimeLlamaEndpointStatus,
+    attempted_at: u64,
+    error: Option<String>,
+    current: crate::runtime_data::RuntimeLlamaSlotsSnapshot,
+) -> crate::runtime_data::RuntimeLlamaSlotsSnapshot {
+    crate::runtime_data::RuntimeLlamaSlotsSnapshot {
+        status,
+        last_attempt_unix_ms: Some(attempted_at),
+        last_success_unix_ms: current.last_success_unix_ms,
+        error,
+        slots: current.slots,
+    }
+}
+
+fn classify_runtime_endpoint_status(
+    status: StatusCode,
+) -> crate::runtime_data::RuntimeLlamaEndpointStatus {
+    match status {
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED => {
+            crate::runtime_data::RuntimeLlamaEndpointStatus::Unavailable
+        }
+        _ => crate::runtime_data::RuntimeLlamaEndpointStatus::Error,
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+const LLAMA_METRICS_RESPONSE_MAX_BYTES: usize = 128 * 1024;
+const LLAMA_METRICS_RAW_TEXT_MAX_BYTES: usize = 64 * 1024;
+const LLAMA_METRICS_MAX_SAMPLES: usize = 32;
+const LLAMA_METRICS_MAX_LABELS: usize = 8;
+const LLAMA_METRICS_MAX_LABEL_BYTES: usize = 96;
+const LLAMA_SLOTS_RESPONSE_MAX_BYTES: usize = 128 * 1024;
+const LLAMA_SLOTS_MAX_ENTRIES: usize = 64;
+const LLAMA_SLOT_JSON_MAX_BYTES: usize = 4 * 1024;
+
+struct LlamaMetricPermit {
+    name: &'static str,
+    labels: &'static [&'static str],
+}
+
+const LLAMA_METRIC_PERMITS: &[LlamaMetricPermit] = &[
+    LlamaMetricPermit {
+        name: "llama_requests_processing",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llama_requests_deferred",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llama_prompt_tokens_total",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llama_tokens_predicted_total",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llama_prompt_tokens_seconds",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llama_tokens_predicted_seconds",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llama_slot_tokens",
+        labels: &["slot", "state"],
+    },
+    LlamaMetricPermit {
+        name: "llamacpp:requests_processing",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llamacpp:requests_deferred",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llamacpp:prompt_tokens_total",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llamacpp:tokens_predicted_total",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llamacpp:prompt_tokens_seconds",
+        labels: &[],
+    },
+    LlamaMetricPermit {
+        name: "llamacpp:tokens_predicted_seconds",
+        labels: &[],
+    },
+];
+
+fn permitted_llama_metrics_raw_text(raw_text: &str) -> String {
+    if raw_text.len() <= LLAMA_METRICS_RAW_TEXT_MAX_BYTES {
+        return raw_text.to_string();
+    }
+
+    let mut end = LLAMA_METRICS_RAW_TEXT_MAX_BYTES;
+    while !raw_text.is_char_boundary(end) {
+        end -= 1;
+    }
+    raw_text[..end].to_string()
+}
+
+async fn read_limited_response_json(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Value, String> {
+    let text = read_limited_response_text(response, max_bytes).await?;
+    serde_json::from_str(&text).map_err(|err| err.to_string())
+}
+
+async fn read_limited_response_text(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|content_length| content_length > max_bytes as u64)
+    {
+        return Err(format!("response body exceeds {max_bytes} byte limit"));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|err| err.to_string())? {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("response body exceeds {max_bytes} byte limit"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body).map_err(|err| err.to_string())
+}
+
+pub(crate) fn parse_prometheus_samples(
+    raw_text: &str,
+) -> Vec<crate::runtime_data::RuntimeLlamaMetricSample> {
+    raw_text
+        .lines()
+        .filter_map(parse_prometheus_sample_line)
+        .filter_map(permit_llama_metric_sample)
+        .take(LLAMA_METRICS_MAX_SAMPLES)
+        .collect()
+}
+
+fn permit_llama_metric_sample(
+    mut sample: crate::runtime_data::RuntimeLlamaMetricSample,
+) -> Option<crate::runtime_data::RuntimeLlamaMetricSample> {
+    let permit = LLAMA_METRIC_PERMITS
+        .iter()
+        .find(|permit| permit.name == sample.name)?;
+    sample.labels.retain(|key, value| {
+        permit.labels.contains(&key.as_str())
+            && key.len() <= LLAMA_METRICS_MAX_LABEL_BYTES
+            && value.len() <= LLAMA_METRICS_MAX_LABEL_BYTES
+    });
+    if sample.labels.len() > LLAMA_METRICS_MAX_LABELS {
+        sample.labels = sample
+            .labels
+            .into_iter()
+            .take(LLAMA_METRICS_MAX_LABELS)
+            .collect();
+    }
+    Some(sample)
+}
+
+fn parse_prometheus_sample_line(
+    line: &str,
+) -> Option<crate::runtime_data::RuntimeLlamaMetricSample> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let mut parts = trimmed.split_whitespace();
+    let metric = parts.next()?;
+    let value_text = parts.next()?;
+    let value = parse_prometheus_value(value_text)?;
+    let (name, labels) = parse_prometheus_metric_and_labels(metric)?;
+    Some(crate::runtime_data::RuntimeLlamaMetricSample {
+        name,
+        labels,
+        value,
+    })
+}
+
+fn parse_prometheus_value(value: &str) -> Option<f64> {
+    match value {
+        "+Inf" | "Inf" => Some(f64::INFINITY),
+        "-Inf" => Some(f64::NEG_INFINITY),
+        "NaN" => Some(f64::NAN),
+        _ => value.parse::<f64>().ok(),
+    }
+}
+
+fn parse_prometheus_metric_and_labels(
+    metric: &str,
+) -> Option<(String, std::collections::BTreeMap<String, String>)> {
+    if let Some((name, rest)) = metric.split_once('{') {
+        let labels_text = rest.strip_suffix('}')?;
+        Some((name.to_string(), parse_prometheus_labels(labels_text)?))
+    } else {
+        Some((metric.to_string(), std::collections::BTreeMap::new()))
+    }
+}
+
+fn parse_prometheus_labels(labels: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut map = std::collections::BTreeMap::new();
+    if labels.trim().is_empty() {
+        return Some(map);
+    }
+    for pair in labels.split(',') {
+        let (key, raw_value) = pair.split_once('=')?;
+        let value = raw_value.trim().strip_prefix('"')?.strip_suffix('"')?;
+        map.insert(key.trim().to_string(), value.replace(r#"\""#, r#"""#));
+    }
+    Some(map)
+}
+
+pub(crate) fn parse_llama_slots(
+    json: &Value,
+) -> Result<Vec<crate::runtime_data::RuntimeLlamaSlotSnapshot>, String> {
+    let entries = json
+        .as_array()
+        .ok_or_else(|| "expected /slots JSON array".to_string())?;
+    entries
+        .iter()
+        .take(LLAMA_SLOTS_MAX_ENTRIES)
+        .map(parse_llama_slot_entry)
+        .collect()
+}
+
+fn parse_llama_slot_entry(
+    value: &Value,
+) -> Result<crate::runtime_data::RuntimeLlamaSlotSnapshot, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "expected /slots entry object".to_string())?;
+    let mut extra = object.clone();
+    let id = parse_u64_field(&mut extra, "id");
+    let id_task = parse_u64_field(&mut extra, "id_task");
+    let n_ctx = parse_u64_field(&mut extra, "n_ctx");
+    let speculative = parse_bool_field(&mut extra, "speculative");
+    let is_processing = parse_bool_field(&mut extra, "is_processing");
+    let next_token = extra
+        .remove("next_token")
+        .map(|value| bounded_slot_json_value(value, LLAMA_SLOT_JSON_MAX_BYTES));
+    let params = extra
+        .remove("params")
+        .map(|value| bounded_slot_json_value(value, LLAMA_SLOT_JSON_MAX_BYTES));
+    let extra = bounded_slot_json_value(Value::Object(extra), LLAMA_SLOT_JSON_MAX_BYTES);
+    Ok(crate::runtime_data::RuntimeLlamaSlotSnapshot {
+        id,
+        id_task,
+        n_ctx,
+        speculative,
+        is_processing,
+        next_token,
+        params,
+        extra,
+    })
+}
+
+fn bounded_slot_json_value(value: Value, max_bytes: usize) -> Value {
+    match serde_json::to_vec(&value) {
+        Ok(encoded) if encoded.len() <= max_bytes => value,
+        _ => Value::String("[truncated]".to_string()),
+    }
+}
+
+fn parse_u64_field(map: &mut serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+    map.remove(key).and_then(|value| match value {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_i64().and_then(|v| u64::try_from(v).ok())),
+        Value::String(text) => text.parse::<u64>().ok(),
+        _ => None,
+    })
+}
+
+fn parse_bool_field(map: &mut serde_json::Map<String, Value>, key: &str) -> Option<bool> {
+    map.remove(key).and_then(|value| match value {
+        Value::Bool(flag) => Some(flag),
+        Value::Number(number) => number.as_u64().map(|v| v != 0),
+        Value::String(text) => match text.trim() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 /// Simple HTTP health check (avoid adding reqwest as a dep — just use TCP + raw HTTP)
 async fn reqwest_health_check(url: &str) -> bool {
     // Parse host:port from URL
@@ -1623,9 +2394,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_context_size, is_safe_kill_target, parse_available_devices, preferred_device,
-        terminate_process, wait_for_exit, BinaryFlavor, KvCacheQuant, KvCacheWarning, KvType,
-        RpcServerHandle, SplitMode, GB,
+        compute_context_size, is_safe_kill_target, model_label, parse_available_devices,
+        preferred_device, terminate_process, wait_for_exit, BinaryFlavor, KvCacheQuant,
+        KvCacheWarning, KvType, RpcServerHandle, SplitMode, GB,
     };
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1639,6 +2410,22 @@ mod tests {
         assert!(
             quant.validation_warnings().is_empty(),
             "small-model default should not trigger any upstream bug warnings"
+        );
+    }
+
+    #[test]
+    fn model_label_uses_clean_stem_for_gguf_paths() {
+        assert_eq!(
+            model_label(Path::new(
+                "/Users/example/.cache/huggingface/hub/Qwen3.5-27B-Q4_K_M.gguf"
+            )),
+            "Qwen3.5-27B-Q4_K_M"
+        );
+        assert_eq!(
+            model_label(Path::new(
+                "/Users/example/.cache/huggingface/hub/GLM-5-UD-IQ2_XXS-00001-of-00006.gguf"
+            )),
+            "GLM-5-UD-IQ2_XXS"
         );
     }
 
@@ -1863,6 +2650,60 @@ No devices found
             preferred_device(&available, Some(BinaryFlavor::Vulkan)),
             Some("Vulkan0".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_requested_device_from_available_rejects_missing_device() {
+        let available = vec!["Vulkan0".to_string(), "CPU".to_string()];
+        let err = super::resolve_requested_device_from_available(
+            &available,
+            Path::new("/tmp/rpc-server-vulkan"),
+            "Vulkan1",
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("requested device Vulkan1 is not supported"));
+        assert!(message.contains("Available devices: Vulkan0, CPU"));
+    }
+
+    #[test]
+    fn resolve_requested_device_from_available_preserves_rocm_hip_alias() {
+        let available = vec!["HIP1".to_string(), "CPU".to_string()];
+        let resolved = super::resolve_requested_device_from_available(
+            &available,
+            Path::new("/tmp/rpc-server-rocm"),
+            "ROCm1",
+        )
+        .unwrap();
+
+        assert_eq!(resolved, "HIP1");
+    }
+
+    #[test]
+    fn resolve_requested_device_from_available_keeps_request_when_probe_empty() {
+        let available = Vec::new();
+        let resolved = super::resolve_requested_device_from_available(
+            &available,
+            Path::new("/tmp/rpc-server-vulkan"),
+            "Vulkan1",
+        )
+        .unwrap();
+
+        assert_eq!(resolved, "Vulkan1");
+    }
+
+    #[test]
+    fn backend_device_for_flavor_uses_backend_namespace() {
+        assert_eq!(
+            super::backend_device_for_flavor(0, BinaryFlavor::Vulkan),
+            Some("Vulkan0".to_string())
+        );
+        assert_eq!(
+            super::backend_device_for_flavor(1, BinaryFlavor::Cuda),
+            Some("CUDA1".to_string())
+        );
+        assert_eq!(super::backend_device_for_flavor(0, BinaryFlavor::Cpu), None);
     }
 
     #[test]
@@ -2172,6 +3013,7 @@ No devices found
             total_group_vram: None,
             selected_gpu: None,
             slots: 8, // ← compile-time check: field must exist and be accessible
+            runtime_data_producer: None,
         };
     }
 
@@ -2199,6 +3041,7 @@ No devices found
             total_group_vram: Some(96_000_000_000u64),
             selected_gpu: None,
             slots: 16, // non-default value from TOML config
+            runtime_data_producer: None,
         };
         assert_eq!(spec.slots, 16);
     }
@@ -2227,6 +3070,7 @@ No devices found
             total_group_vram: None,
             selected_gpu: None,
             slots: 32,
+            runtime_data_producer: None,
         };
 
         // Destructure exactly as start_llama_server does it (lines ~1078-1091)
@@ -2272,6 +3116,7 @@ No devices found
             total_group_vram: None,
             selected_gpu: None,
             slots: 4, // explicit default from TOML config fallback
+            runtime_data_producer: None,
         };
         assert_eq!(good_spec.slots, 4);
     }

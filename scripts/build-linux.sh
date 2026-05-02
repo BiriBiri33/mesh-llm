@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-LLAMA_DIR="$REPO_ROOT/llama.cpp"
+LLAMA_DIR="${MESH_LLM_LLAMA_DIR:-$REPO_ROOT/.deps/llama.cpp}"
 BUILD_DIR="$LLAMA_DIR/build"
 MESH_DIR="$REPO_ROOT/mesh-llm"
 UI_DIR="$MESH_DIR/ui"
@@ -136,17 +136,27 @@ locate_vulkan_toolchain() {
         fi
     fi
 
-    if pkg-config --exists vulkan 2>/dev/null; then
-        return 0
+    local has_vulkan_headers=false
+    local has_spirv_headers=false
+
+    if pkg-config --exists vulkan 2>/dev/null ||
+        [[ -f /usr/include/vulkan/vulkan.h || -f /usr/local/include/vulkan/vulkan.h ]]; then
+        has_vulkan_headers=true
     fi
 
-    if [[ -f /usr/include/vulkan/vulkan.h || -f /usr/local/include/vulkan/vulkan.h ]]; then
+    if [[ -f /usr/include/spirv/unified1/spirv.hpp ||
+        -f /usr/local/include/spirv/unified1/spirv.hpp ]]; then
+        has_spirv_headers=true
+    fi
+
+    if [[ "$has_vulkan_headers" == true && "$has_spirv_headers" == true ]]; then
         return 0
     fi
 
     if [[ -n "${VULKAN_SDK:-}" ]]; then
         export CMAKE_PREFIX_PATH="${VULKAN_SDK}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
-        if [[ -f "$VULKAN_SDK/include/vulkan/vulkan.h" ]]; then
+        if [[ -f "$VULKAN_SDK/include/vulkan/vulkan.h" &&
+            -f "$VULKAN_SDK/include/spirv/unified1/spirv.hpp" ]]; then
             return 0
         fi
     fi
@@ -181,6 +191,34 @@ configure_compiler_cache() {
             compiler_launcher_flags+=(-DCMAKE_HIP_COMPILER_LAUNCHER="$cache_bin")
             ;;
     esac
+}
+
+stage_dev_runtime_binaries() {
+    local backend="$1"
+    local target_dir="$2"
+    local source_bin_dir="$BUILD_DIR/bin"
+
+    mkdir -p "$target_dir"
+    rm -f "$target_dir/rpc-server" "$target_dir/llama-server"
+    rm -f "$target_dir"/rpc-server-* "$target_dir"/llama-server-*
+
+    for name in rpc-server llama-server; do
+        local source="$source_bin_dir/$name"
+        if [[ ! -f "$source" ]]; then
+            echo "Error: expected llama.cpp binary not found: $source" >&2
+            exit 1
+        fi
+        cp "$source" "$target_dir/$name-$backend"
+    done
+
+    for name in llama-moe-analyze llama-moe-split; do
+        local source="$source_bin_dir/$name"
+        if [[ -f "$source" ]]; then
+            cp "$source" "$target_dir/$name"
+        fi
+    done
+
+    echo "Staged llama.cpp runtime binaries in $target_dir with '$backend' flavor names."
 }
 
 if [[ -z "$BACKEND" ]]; then
@@ -220,8 +258,8 @@ case "$BACKEND" in
     vulkan)
         locate_vulkan_toolchain || {
             echo "Error: Vulkan SDK/development files not found." >&2
-            echo "  Need both the Vulkan headers/loader and 'glslc' in your PATH." >&2
-            echo "  Ubuntu/Debian: sudo apt install libvulkan-dev glslc" >&2
+            echo "  Need the Vulkan headers/loader, SPIR-V headers, and 'glslc' in your PATH." >&2
+            echo "  Ubuntu/Debian: sudo apt install libvulkan-dev glslc spirv-headers" >&2
             echo "  Arch Linux:    sudo pacman -S vulkan-headers shaderc" >&2
             exit 1
         }
@@ -237,69 +275,7 @@ case "$BACKEND" in
         ;;
 esac
 
-# MESH_LLM_LLAMA_PIN_SHA pins the llama.cpp checkout to a specific commit and
-# disables the `git pull` that would otherwise move the working tree forward.
-# This is required by the cross-PR llama.cpp / CUDA artifact cache in
-# .github/workflows/ci.yml: the cache key embeds the resolved upstream SHA, so
-# the actual checkout MUST match that SHA byte-for-byte or the restored
-# `llama.cpp/build/` directory will be inconsistent with the source tree and
-# cmake will silently rebuild things.
-#
-# Pin priority: env var > LLAMA_CPP_SHA file > unpinned (track master HEAD)
-LLAMA_PIN_SHA="${MESH_LLM_LLAMA_PIN_SHA:-}"
-if [[ -z "$LLAMA_PIN_SHA" && -f "$REPO_ROOT/LLAMA_CPP_SHA" ]]; then
-    LLAMA_PIN_SHA="$(tr -d '[:space:]' < "$REPO_ROOT/LLAMA_CPP_SHA")"
-fi
-
-if [[ ! -d "$LLAMA_DIR" ]]; then
-    if [[ -n "$LLAMA_PIN_SHA" ]]; then
-        echo "Cloning Mesh-LLM/llama.cpp pinned to $LLAMA_PIN_SHA..."
-        # Shallow clone of master first (the common case is that
-        # $LLAMA_PIN_SHA == master HEAD because ci.yml resolves it
-        # via `git ls-remote ... refs/heads/master`). If the branch
-        # has moved between resolve and clone, fall back to fetching the
-        # specific commit.
-        git clone -b master --depth 1 \
-            https://github.com/Mesh-LLM/llama.cpp.git "$LLAMA_DIR"
-        if ! (cd "$LLAMA_DIR" && git cat-file -e "${LLAMA_PIN_SHA}^{commit}" 2>/dev/null); then
-            echo "Pinned SHA not on master tip, fetching explicitly..."
-            (cd "$LLAMA_DIR" && git fetch --depth 1 origin "$LLAMA_PIN_SHA")
-        fi
-        (cd "$LLAMA_DIR" && git checkout --detach "$LLAMA_PIN_SHA")
-    else
-        echo "Cloning Mesh-LLM/llama.cpp (master)..."
-        git clone -b master \
-            https://github.com/Mesh-LLM/llama.cpp.git "$LLAMA_DIR"
-    fi
-else
-    cd "$LLAMA_DIR"
-    if [[ -n "$LLAMA_PIN_SHA" ]]; then
-        # Pinned mode: do NOT pull. Fetch the requested SHA if missing and
-        # check it out in detached HEAD. Skipping `git pull` is the whole
-        # point — it keeps the working tree byte-identical to what the cache
-        # key promises.
-        if ! git cat-file -e "${LLAMA_PIN_SHA}^{commit}" 2>/dev/null; then
-            echo "Fetching pinned llama.cpp SHA $LLAMA_PIN_SHA..."
-            git fetch --depth 1 origin "$LLAMA_PIN_SHA"
-        fi
-        CURRENT_SHA="$(git rev-parse HEAD)"
-        if [[ "$CURRENT_SHA" != "$LLAMA_PIN_SHA" ]]; then
-            echo "Checking out pinned llama.cpp SHA $LLAMA_PIN_SHA (was $CURRENT_SHA)..."
-            git checkout --detach "$LLAMA_PIN_SHA"
-        else
-            echo "llama.cpp already at pinned SHA $LLAMA_PIN_SHA, no checkout needed"
-        fi
-    else
-        CURRENT_BRANCH=$(git branch --show-current)
-        if [[ "$CURRENT_BRANCH" != "master" ]]; then
-            echo "⚠️  llama.cpp is on branch '$CURRENT_BRANCH', switching to master..."
-            git checkout master
-        fi
-        echo "Pulling latest master from origin..."
-        git pull --ff-only origin master
-    fi
-    cd "$REPO_ROOT"
-fi
+LLAMA_WORKDIR="$LLAMA_DIR" "$SCRIPT_DIR/prepare-llama.sh" "${MESH_LLM_LLAMA_PIN_SHA:-pinned}"
 
 if [[ "$CLEAN" -eq 1 && -d "$BUILD_DIR" ]]; then
     echo "Cleaning build dir..."
@@ -422,10 +398,12 @@ if [[ -d "$MESH_DIR" ]]; then
     if [[ "${MESH_LLM_BUILD_PROFILE:-release}" == "dev" || "${MESH_LLM_BUILD_PROFILE:-release}" == "debug" ]]; then
         echo "Building mesh-llm (profile: dev, bin only)..."
         (cd "$REPO_ROOT" && cargo build -p mesh-llm --bin mesh-llm)
+        stage_dev_runtime_binaries "$BACKEND" "$REPO_ROOT/target/debug"
         echo "Mesh binary: target/debug/mesh-llm"
     else
         echo "Building mesh-llm (profile: release)..."
         (cd "$MESH_DIR" && cargo build --release)
+        stage_dev_runtime_binaries "$BACKEND" "$REPO_ROOT/target/release"
         echo "Mesh binary: target/release/mesh-llm"
     fi
 fi

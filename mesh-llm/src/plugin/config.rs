@@ -1,4 +1,4 @@
-use super::{PluginSummary, BLACKBOARD_PLUGIN_ID, BLOBSTORE_PLUGIN_ID, LEMONADE_PLUGIN_ID};
+use super::{PluginSummary, BLACKBOARD_PLUGIN_ID, BLOBSTORE_PLUGIN_ID, OPENAI_ENDPOINT_PLUGIN_ID};
 use anyhow::{bail, Context, Result};
 use mesh_llm_plugin::MeshVisibility;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,9 @@ pub struct PluginConfigEntry {
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Base URL for inference endpoint plugins (e.g. http://localhost:8000/v1).
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +71,8 @@ pub struct ExternalPluginSpec {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    /// Backend URL for inference endpoint plugins.
+    pub url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -149,14 +154,15 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
     let mut names = BTreeMap::<String, ()>::new();
     let mut blackboard_enabled = true;
     let mut blobstore_enabled = true;
-    let mut lemonade_enabled = false;
+    let mut openai_endpoint_enabled = false;
+    let mut openai_endpoint_url: Option<String> = None;
     for entry in &config.plugins {
         if names.insert(entry.name.clone(), ()).is_some() {
             bail!("Duplicate plugin entry '{}'", entry.name);
         }
         let enabled = entry.enabled.unwrap_or(true);
         if entry.name == BLACKBOARD_PLUGIN_ID {
-            if entry.command.is_some() || !entry.args.is_empty() {
+            if entry.command.is_some() || !entry.args.is_empty() || entry.url.is_some() {
                 bail!(
                     "Plugin '{}' is served by mesh-llm itself; only `enabled` may be set",
                     BLACKBOARD_PLUGIN_ID
@@ -166,7 +172,7 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
             continue;
         }
         if entry.name == BLOBSTORE_PLUGIN_ID {
-            if entry.command.is_some() || !entry.args.is_empty() {
+            if entry.command.is_some() || !entry.args.is_empty() || entry.url.is_some() {
                 bail!(
                     "Plugin '{}' is served by mesh-llm itself; only `enabled` may be set",
                     BLOBSTORE_PLUGIN_ID
@@ -175,14 +181,17 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
             blobstore_enabled = enabled;
             continue;
         }
-        if entry.name == LEMONADE_PLUGIN_ID {
+        if entry.name == OPENAI_ENDPOINT_PLUGIN_ID {
             if entry.command.is_some() || !entry.args.is_empty() {
                 bail!(
-                    "Plugin '{}' is served by mesh-llm itself; only `enabled` may be set",
-                    LEMONADE_PLUGIN_ID
+                    "Plugin '{}' is served by mesh-llm itself; only `enabled` and `url` may be set",
+                    OPENAI_ENDPOINT_PLUGIN_ID
                 );
             }
-            lemonade_enabled = enabled;
+            openai_endpoint_enabled = enabled;
+            if let Some(ref url) = entry.url {
+                openai_endpoint_url = Some(url.clone());
+            }
             continue;
         }
         if !enabled {
@@ -196,14 +205,17 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
             name: entry.name.clone(),
             command,
             args: entry.args.clone(),
+            url: None,
         });
     }
 
     if blackboard_enabled {
         externals.insert(0, blackboard_plugin_spec()?);
     }
-    if lemonade_enabled {
-        externals.push(lemonade_plugin_spec()?);
+    if openai_endpoint_enabled {
+        let mut spec = openai_endpoint_plugin_spec()?;
+        spec.url = openai_endpoint_url;
+        externals.push(spec);
     }
     if blobstore_enabled {
         externals.push(blobstore_plugin_spec()?);
@@ -223,7 +235,13 @@ pub fn blackboard_plugin_spec() -> Result<ExternalPluginSpec> {
     Ok(ExternalPluginSpec {
         name: BLACKBOARD_PLUGIN_ID.to_string(),
         command,
-        args: vec!["--plugin".into(), BLACKBOARD_PLUGIN_ID.into()],
+        args: vec![
+            "--log-format".into(),
+            "json".into(),
+            "--plugin".into(),
+            BLACKBOARD_PLUGIN_ID.into(),
+        ],
+        url: None,
     })
 }
 
@@ -235,19 +253,31 @@ pub fn blobstore_plugin_spec() -> Result<ExternalPluginSpec> {
     Ok(ExternalPluginSpec {
         name: BLOBSTORE_PLUGIN_ID.to_string(),
         command,
-        args: vec!["--plugin".into(), BLOBSTORE_PLUGIN_ID.into()],
+        args: vec![
+            "--log-format".into(),
+            "json".into(),
+            "--plugin".into(),
+            BLOBSTORE_PLUGIN_ID.into(),
+        ],
+        url: None,
     })
 }
 
-pub fn lemonade_plugin_spec() -> Result<ExternalPluginSpec> {
+pub fn openai_endpoint_plugin_spec() -> Result<ExternalPluginSpec> {
     let command = std::env::current_exe()
         .context("Cannot determine mesh-llm executable path")?
         .display()
         .to_string();
     Ok(ExternalPluginSpec {
-        name: LEMONADE_PLUGIN_ID.to_string(),
+        name: OPENAI_ENDPOINT_PLUGIN_ID.to_string(),
         command,
-        args: vec!["--plugin".into(), LEMONADE_PLUGIN_ID.into()],
+        args: vec![
+            "--log-format".into(),
+            "json".into(),
+            "--plugin".into(),
+            OPENAI_ENDPOINT_PLUGIN_ID.into(),
+        ],
+        url: None,
     })
 }
 
@@ -532,9 +562,14 @@ model = "Qwen3-8B-Q4_K_M"
 
     #[test]
     fn gpu_parallel_unwrap_or_default_is_4() {
-        let values = [None, Some(1usize), Some(8usize), Some(64usize)];
-        let resolved: Vec<_> = values.into_iter().map(|value| value.unwrap_or(4)).collect();
-        assert_eq!(resolved, vec![4, 1, 8, 64]);
+        fn parsed_parallel(value: Option<usize>) -> usize {
+            value.unwrap_or(4)
+        }
+
+        assert_eq!(parsed_parallel(None), 4);
+        assert_eq!(parsed_parallel(Some(1)), 1);
+        assert_eq!(parsed_parallel(Some(8)), 8);
+        assert_eq!(parsed_parallel(Some(64)), 64);
     }
 
     #[test]

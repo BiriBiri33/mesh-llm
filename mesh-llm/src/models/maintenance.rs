@@ -1,4 +1,3 @@
-use super::local::huggingface_snapshot_path;
 use super::{build_hf_api, huggingface_hub_cache_dir, short_revision};
 use crate::cli::terminal_progress::{clear_stderr_line, DeterminateProgressLine};
 use anyhow::{Context, Result};
@@ -395,15 +394,59 @@ fn is_not_found_error(message: &str) -> bool {
 }
 
 fn cached_repo_files(repo: &CachedRepo) -> Result<Vec<String>> {
-    let root = huggingface_snapshot_path(&repo.repo_id, RepoType::Model, &repo.local_revision);
-    if !root.is_dir() {
+    let snapshots_dir = huggingface_hub_cache_dir()
+        .join(super::local::huggingface_repo_folder_name(
+            &repo.repo_id,
+            RepoType::Model,
+        ))
+        .join("snapshots");
+    if !snapshots_dir.is_dir() {
         return Ok(Vec::new());
     }
 
-    let mut files = Vec::new();
-    collect_snapshot_files(&root, &root, &mut files)?;
-    files.sort();
-    Ok(files)
+    let mut snapshot_entries = Vec::new();
+    for entry in std::fs::read_dir(&snapshots_dir)
+        .with_context(|| format!("Read {}", snapshots_dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        snapshot_entries.push((
+            entry.file_name().to_string_lossy().to_string(),
+            entry.path(),
+        ));
+    }
+
+    let mut snapshot_roots = Vec::new();
+    let exact = snapshots_dir.join(&repo.local_revision);
+    if exact.is_dir() {
+        snapshot_roots.push(exact);
+    } else {
+        let mut prefix_matches: Vec<PathBuf> = snapshot_entries
+            .iter()
+            .filter(|(name, _)| {
+                name.starts_with(&repo.local_revision) || repo.local_revision.starts_with(name)
+            })
+            .map(|(_, path)| path.clone())
+            .collect();
+        prefix_matches.sort();
+        snapshot_roots.extend(prefix_matches);
+    }
+
+    if snapshot_roots.is_empty() {
+        let mut all: Vec<PathBuf> = snapshot_entries.into_iter().map(|(_, path)| path).collect();
+        all.sort();
+        snapshot_roots = all;
+    }
+
+    let mut files = BTreeSet::new();
+    for root in snapshot_roots {
+        let mut collected = Vec::new();
+        collect_snapshot_files(&root, &root, &mut collected)?;
+        files.extend(collected);
+    }
+    Ok(files.into_iter().collect())
 }
 
 fn collect_snapshot_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
@@ -426,4 +469,59 @@ fn collect_snapshot_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> R
         files.push(rel);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn restore_env(key: &str, value: Option<OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn cached_repo_files_falls_back_to_matching_snapshot_prefix() {
+        let prev_hub_cache = std::env::var_os("HF_HUB_CACHE");
+        let prev_hf_home = std::env::var_os("HF_HOME");
+        let prev_xdg = std::env::var_os("XDG_CACHE_HOME");
+
+        let base = std::env::temp_dir().join(format!(
+            "mesh-llm-maintenance-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let snapshot = base
+            .join("models--unsloth--Qwen3.6-35B-A3B-GGUF")
+            .join("snapshots")
+            .join("9280dd353ab5cafebabedeadbeef123456789abc");
+        std::fs::create_dir_all(snapshot.join("BF16")).unwrap();
+        std::fs::write(snapshot.join("BF16/model.gguf"), b"gguf").unwrap();
+
+        std::env::set_var("HF_HUB_CACHE", &base);
+        std::env::remove_var("HF_HOME");
+        std::env::remove_var("XDG_CACHE_HOME");
+
+        let repo = CachedRepo {
+            repo_id: "unsloth/Qwen3.6-35B-A3B-GGUF".to_string(),
+            ref_name: "main".to_string(),
+            local_revision: "9280dd353ab5".to_string(),
+        };
+        let files = cached_repo_files(&repo).expect("should collect snapshot files");
+        assert_eq!(files, vec!["BF16/model.gguf".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&base);
+        restore_env("HF_HUB_CACHE", prev_hub_cache);
+        restore_env("HF_HOME", prev_hf_home);
+        restore_env("XDG_CACHE_HOME", prev_xdg);
+    }
 }

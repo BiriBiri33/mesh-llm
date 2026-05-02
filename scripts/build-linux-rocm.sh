@@ -10,17 +10,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-LLAMA_DIR="$REPO_ROOT/llama.cpp"
+LLAMA_DIR="${MESH_LLM_LLAMA_DIR:-$REPO_ROOT/.deps/llama.cpp}"
 BUILD_DIR="$LLAMA_DIR/build"
 MESH_DIR="$REPO_ROOT/mesh-llm"
 UI_DIR="$MESH_DIR/ui"
 
 AMDGPU_TARGETS="${1:-gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201}"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
-LLAMA_PIN_SHA="${MESH_LLM_LLAMA_PIN_SHA:-}"
-if [[ -z "$LLAMA_PIN_SHA" && -f "$REPO_ROOT/LLAMA_CPP_SHA" ]]; then
-    LLAMA_PIN_SHA="$(tr -d '[:space:]' < "$REPO_ROOT/LLAMA_CPP_SHA")"
-fi
 
 if [[ ! -d "$ROCM_PATH" ]]; then
     echo "Error: ROCm not found at $ROCM_PATH" >&2
@@ -55,46 +51,7 @@ configure_compiler_cache() {
     )
 }
 
-if [[ ! -d "$LLAMA_DIR" ]]; then
-    if [[ -n "$LLAMA_PIN_SHA" ]]; then
-        echo "Cloning Mesh-LLM/llama.cpp pinned to $LLAMA_PIN_SHA..."
-        git clone -b master --depth 1 \
-            https://github.com/Mesh-LLM/llama.cpp.git "$LLAMA_DIR"
-        if ! (cd "$LLAMA_DIR" && git cat-file -e "${LLAMA_PIN_SHA}^{commit}" 2>/dev/null); then
-            echo "Pinned SHA not on master tip, fetching explicitly..."
-            (cd "$LLAMA_DIR" && git fetch --depth 1 origin "$LLAMA_PIN_SHA")
-        fi
-        (cd "$LLAMA_DIR" && git checkout --detach "$LLAMA_PIN_SHA")
-    else
-        echo "Cloning Mesh-LLM/llama.cpp (master)..."
-        git clone -b master \
-            https://github.com/Mesh-LLM/llama.cpp.git "$LLAMA_DIR"
-    fi
-else
-    cd "$LLAMA_DIR"
-    if [[ -n "$LLAMA_PIN_SHA" ]]; then
-        if ! git cat-file -e "${LLAMA_PIN_SHA}^{commit}" 2>/dev/null; then
-            echo "Fetching pinned llama.cpp SHA $LLAMA_PIN_SHA..."
-            git fetch --depth 1 origin "$LLAMA_PIN_SHA"
-        fi
-        CURRENT_SHA="$(git rev-parse HEAD)"
-        if [[ "$CURRENT_SHA" != "$LLAMA_PIN_SHA" ]]; then
-            echo "Checking out pinned llama.cpp SHA $LLAMA_PIN_SHA (was $CURRENT_SHA)..."
-            git checkout --detach "$LLAMA_PIN_SHA"
-        else
-            echo "llama.cpp already at pinned SHA $LLAMA_PIN_SHA, no checkout needed"
-        fi
-    else
-        CURRENT_BRANCH=$(git branch --show-current)
-        if [[ "$CURRENT_BRANCH" != "master" ]]; then
-            echo "⚠️  llama.cpp is on branch '$CURRENT_BRANCH', switching to master..."
-            git checkout master
-        fi
-        echo "Pulling latest master from origin..."
-        git pull --ff-only origin master
-    fi
-    cd "$REPO_ROOT"
-fi
+LLAMA_WORKDIR="$LLAMA_DIR" "$SCRIPT_DIR/prepare-llama.sh" "${MESH_LLM_LLAMA_PIN_SHA:-pinned}"
 
 echo "Using ROCm from $ROCM_PATH"
 echo "Building for AMDGPU targets: $AMDGPU_TARGETS"

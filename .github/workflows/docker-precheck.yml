@@ -109,16 +109,16 @@ jobs:
           grep -q "libdbus-1-dev" "${{ inputs.dockerfile_path }}"
           echo "PASS: libdbus-1-dev present"
 
-      - name: Llama builder uses Mesh-LLM fork
+      - name: Llama builder uses patch queue
         if: ${{ inputs.validate_llama_builder }}
         shell: bash
         run: |
           set -euo pipefail
           file="${{ inputs.dockerfile_path }}"
-          if grep -q "Mesh-LLM/llama.cpp" "$file"; then
-            echo "PASS: uses Mesh-LLM/llama.cpp fork"
+          if grep -q "scripts/prepare-llama.sh pinned" "$file" && grep -q "third_party/llama.cpp" "$file"; then
+            echo "PASS: uses llama.cpp patch queue"
           else
-            echo "FAIL: expected Mesh-LLM/llama.cpp clone URL in $file" >&2
+            echo "FAIL: expected patch-queue prepare flow in $file" >&2
             exit 1
           fi
 

@@ -1,128 +1,116 @@
-# llama.cpp Fork
+# llama.cpp Patch Queue
 
-mesh-llm uses a lightly patched fork of llama.cpp:
+mesh-llm builds llama.cpp from upstream `ggml-org/llama.cpp` plus a local patch
+queue. The old fork workflow has been retired for normal builds.
 
-**[github.com/Mesh-LLM/llama.cpp](https://github.com/Mesh-LLM/llama.cpp)**
+## Source Layout
 
-All custom patches live on `master`. The pinned commit SHA is in `LLAMA_CPP_SHA` at the repo root.
-
----
-
-## What's on the fork
-
-8 commits on top of upstream `ggml-org/llama.cpp`:
-
-| Commits | Area | What |
-|---|---|---|
-| 3 | RPC | Zero-transfer GGUF loading, alloc cache, B2B direct transfers |
-| 4 | MoE | Expert mask routing, analysis tool, split tool, shared-expert fix |
-| 1 | Mesh hooks | Virtual LLM engine — inter-model collaboration during inference |
-
-All patches are additive. When `--mesh-port` is not passed, hook code is completely inert.
-
----
-
-## Updating the fork from upstream
-
-When you want to pick up new llama.cpp features:
-
-```bash
-cd /path/to/Mesh-LLM/llama.cpp    # the fork checkout
-
-# Add upstream if not already set
-git remote add upstream https://github.com/ggml-org/llama.cpp.git
-
-# Rebase our commits onto latest upstream
-git fetch upstream
-git rebase upstream/master
-
-# Resolve any conflicts in source files, then:
-#   git add <fixed files>
-#   git rebase --continue
-
-# Force-push (this is our fork, linear history, force-push is correct here)
-git push origin master --force-with-lease
+```text
+third_party/llama.cpp/upstream.txt   pinned upstream commit
+third_party/llama.cpp/patches/       Mesh-LLM patch queue
+.deps/llama.cpp/                     prepared checkout, ignored by git
 ```
 
-Then in the mesh-llm repo:
+`LLAMA_CPP_SHA` is temporarily kept as a compatibility mirror of
+`third_party/llama.cpp/upstream.txt`. New scripts should treat
+`third_party/llama.cpp/upstream.txt` as the source of truth.
+
+## What's In The Patch Queue
+
+The current queue is the flattened form of the former Mesh-LLM llama.cpp fork.
+It contains patches for:
+
+- RPC optimizations: zero-transfer GGUF loading, allocation-size caching, and
+  direct worker-to-worker tensor transfers
+- MoE support: expert mask routing, `llama-moe-analyze`, `llama-moe-split`,
+  standalone shard output, multi-shard tensor reading, and GLM/Qwen expert
+  tensor fixes
+- Mesh hooks: virtual LLM callback hooks used by inter-model collaboration
+
+All runtime behavior remains external-process based in this migration:
+mesh-llm still launches `rpc-server` and `llama-server`.
+
+## Preparing llama.cpp
 
 ```bash
-# Update the pinned SHA
-cd /path/to/mesh-llm
-echo "$(cd /path/to/Mesh-LLM/llama.cpp && git rev-parse HEAD)" > LLAMA_CPP_SHA
+scripts/prepare-llama.sh pinned
+```
 
-# Update local checkout
-cd llama.cpp
-git fetch origin
-git checkout master
-git reset --hard origin/master
+This:
 
-# Build and test
-cd ..
+1. clones or fetches upstream `ggml-org/llama.cpp` into `.deps/llama.cpp`
+2. checks out the pinned upstream SHA from `third_party/llama.cpp/upstream.txt`
+3. applies all patches in `third_party/llama.cpp/patches/` with `git am --3way`
+4. writes diagnostic SHAs under `.deps/llama.cpp/.git/`
+5. creates a best-effort `llama.cpp -> .deps/llama.cpp` compatibility symlink
+
+To test the patch queue against current upstream without moving the pin:
+
+```bash
+scripts/prepare-llama.sh latest
+```
+
+To test a specific upstream commit:
+
+```bash
+scripts/prepare-llama.sh <upstream-sha>
+```
+
+## Building
+
+Use `just build`; do not manually build llama.cpp for normal development.
+
+The platform build scripts call `scripts/prepare-llama.sh` before CMake and
+then build from `.deps/llama.cpp/build`.
+
+Important backend flags are preserved from the fork workflow:
+
+- `GGML_RPC=ON`
+- `BUILD_SHARED_LIBS=OFF`
+- `LLAMA_OPENSSL=OFF`
+- Metal on macOS
+- CPU/CUDA/ROCm/Vulkan backend selection on Linux
+- `GGML_CUDA_FA_ALL_QUANTS=ON` by default for CUDA release correctness
+
+## Updating The Upstream Pin
+
+```bash
+scripts/prepare-llama.sh latest
 just build
-cargo test -p mesh-llm
-
-# Commit the SHA bump
-git add LLAMA_CPP_SHA
-git commit -m "bump llama.cpp to $(cat LLAMA_CPP_SHA | head -c 12)"
+cargo test -p mesh-llm --lib
 ```
 
-## Telling an agent to sync the fork
-
-Give an agent these instructions:
-
-> The llama.cpp fork is at `github.com/Mesh-LLM/llama.cpp`. It has our custom
-> patches (RPC, MoE, mesh hooks) rebased on top of upstream `ggml-org/llama.cpp`.
->
-> To sync with upstream:
-> 1. Clone or cd into the fork: `git clone git@github.com:Mesh-LLM/llama.cpp.git`
-> 2. `git remote add upstream https://github.com/ggml-org/llama.cpp.git` (if needed)
-> 3. `git fetch upstream && git rebase upstream/master`
-> 4. Fix any conflicts — our patches touch: `ggml-rpc.cpp`, `rpc-server.cpp`,
->    `llama-model.cpp`, `llama-graph.cpp`, `server-context.cpp`, `server-common.cpp`,
->    `server-task.h/cpp`, `common.h`, `arg.cpp`, `server-mesh-hook.h` (new file)
-> 5. `git push origin master --force-with-lease`
-> 6. In mesh-llm repo: update `LLAMA_CPP_SHA`, rebuild, test.
->
-> The fork's `master` should always be: upstream HEAD + our 8 commits on top.
-> Never merge — always rebase to keep linear history.
-
-## Adding new patches to the fork
+If the patch queue applies and validation passes:
 
 ```bash
-cd /path/to/Mesh-LLM/llama.cpp
-
-# Edit files, build, test
-# ...
-
-# Commit
-git add -p && git commit -m "description of change"
-
-# Push
-git push origin master
-
-# In mesh-llm repo: update LLAMA_CPP_SHA
+cp third_party/llama.cpp/upstream.txt /tmp/old-llama-upstream.txt
+git -C .deps/llama.cpp rev-parse "$(cat .deps/llama.cpp/.git/mesh-llm-upstream-sha)" > third_party/llama.cpp/upstream.txt
+cp third_party/llama.cpp/upstream.txt LLAMA_CPP_SHA
 ```
 
-## Files we touch
+Then commit the pin update with any patch refreshes.
 
-**RPC (3 commits):**
-- `ggml/include/ggml-rpc.h`
-- `ggml/src/ggml-rpc/ggml-rpc.cpp`
-- `src/llama-model.cpp`
-- `tools/rpc/rpc-server.cpp`
+## Refreshing Patches
 
-**MoE (4 commits):**
-- `common/common.h` (hparams)
-- `include/llama.h`
-- `src/llama-graph.cpp`, `src/llama-graph.h`, `src/llama-hparams.h`, `src/llama-model.cpp`
-- `tools/moe-analyze/` (new)
-- `tools/moe-split/` (new)
-- `tools/CMakeLists.txt`, `tests/CMakeLists.txt`
+Use a temporary llama.cpp working tree for patch authoring, then export patches
+with `git format-patch`.
 
-**Mesh hooks (1 commit):**
-- `tools/server/server-mesh-hook.h` (new)
-- `tools/server/server-context.cpp`
-- `tools/server/server-common.cpp`, `tools/server/server-common.h`
-- `tools/server/server-task.h`, `tools/server/server-task.cpp`
-- `common/common.h`, `common/arg.cpp`
+The queue should remain ordered by responsibility:
+
+1. RPC patches
+2. MoE patches
+3. Mesh hook patches
+4. Future llama-stage ABI patches, when intentionally added
+
+Do not add llama-stage ABI patches as part of the fork-to-patch-queue migration.
+That integration is tracked separately in
+[LLAMA_STAGE_INTEGRATION_PLAN.md](LLAMA_STAGE_INTEGRATION_PLAN.md).
+
+## Compatibility Notes
+
+The prepared checkout is intentionally outside tracked source. If tooling still
+expects `llama.cpp/build/bin`, the prepare script creates a compatibility
+symlink when possible. New scripts should prefer `.deps/llama.cpp/build/bin` or
+the `MESH_LLM_LLAMA_DIR` override.
+
+The mesh protocol is unchanged by this migration.

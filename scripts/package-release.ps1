@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
-$buildBinDir = Join-Path $repoRoot "llama.cpp\build\bin"
+$buildBinDir = if ($env:MESH_LLM_LLAMA_BUILD_BIN_DIR) { $env:MESH_LLM_LLAMA_BUILD_BIN_DIR } else { Join-Path $repoRoot ".deps\llama.cpp\build\bin" }
 $releaseBinDir = Join-Path $repoRoot "target\release"
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem

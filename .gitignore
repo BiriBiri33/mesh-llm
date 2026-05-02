@@ -1,5 +1,7 @@
-llama.cpp/
+/llama.cpp/
+/llama.cpp
 llama.cpp-rpc-b2b/
+.deps/
 target/
 .build/
 llama.cpp.bak/

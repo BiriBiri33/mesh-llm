@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-LLAMA_DIR="$REPO_ROOT/llama.cpp"
+LLAMA_DIR="${MESH_LLM_LLAMA_DIR:-$REPO_ROOT/.deps/llama.cpp}"
 BUILD_DIR="$LLAMA_DIR/build"
 UI_DIR="$REPO_ROOT/mesh-llm/ui"
 
@@ -36,20 +36,6 @@ configure_compiler_cache() {
         -DCMAKE_C_COMPILER_LAUNCHER="$cache_bin"
         -DCMAKE_CXX_COMPILER_LAUNCHER="$cache_bin"
     )
-}
-
-LLAMA_REPO="https://github.com/Mesh-LLM/llama.cpp.git"
-LLAMA_PIN_SHA="$(tr -d '[:space:]' < "$REPO_ROOT/LLAMA_CPP_SHA")"
-
-clone_or_update_llama() {
-    if [[ ! -d "$LLAMA_DIR" ]]; then
-        git clone -b master "$LLAMA_REPO" "$LLAMA_DIR"
-    fi
-    cd "$LLAMA_DIR"
-    git fetch origin
-    git checkout "$LLAMA_PIN_SHA" --detach
-    echo "llama.cpp at $(git rev-parse --short HEAD)"
-    cd "$REPO_ROOT"
 }
 
 os_name="$(uname -s)"
@@ -90,7 +76,7 @@ fi
 configure_compiler_cache
 cmake_flags+=("${compiler_launcher_flags[@]}")
 
-clone_or_update_llama
+LLAMA_WORKDIR="$LLAMA_DIR" "$SCRIPT_DIR/prepare-llama.sh" "${MESH_LLM_LLAMA_PIN_SHA:-pinned}"
 
 echo "Configuring llama.cpp for $os_name..."
 cmake "${cmake_flags[@]}"

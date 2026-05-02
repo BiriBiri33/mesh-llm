@@ -15,6 +15,10 @@ on:
       workflow_cache_file:
         required: true
         type: string
+      runs_on:
+        required: false
+        default: '"ubuntu-latest"'
+        type: string
 
 env:
   CACHE_NAMESPACE: mesh-llm
@@ -28,7 +32,7 @@ env:
 jobs:
   smoke_tests:
     name: Inference Smoke Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJson(inputs.runs_on) }}
     steps:
       - uses: actions/checkout@v5
 

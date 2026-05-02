@@ -9,7 +9,7 @@ setopt errexit nounset pipefail
 SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
 
-LLAMA_DIR="$REPO_ROOT/llama.cpp"
+LLAMA_DIR="${MESH_LLM_LLAMA_DIR:-$REPO_ROOT/.deps/llama.cpp}"
 BUILD_DIR="$LLAMA_DIR/build"
 MESH_DIR="$REPO_ROOT/mesh-llm"
 UI_DIR="$MESH_DIR/ui"
@@ -43,51 +43,35 @@ configure_compiler_cache() {
     fi
 }
 
-LLAMA_BRANCH="${LLAMA_BRANCH:-master}"
-LLAMA_REPO="https://github.com/Mesh-LLM/llama.cpp.git"
+stage_dev_runtime_binaries() {
+    local backend="$1"
+    local target_dir="$2"
+    local source_bin_dir="$BUILD_DIR/bin"
 
-# Read pinned SHA from LLAMA_CPP_SHA if it exists
-LLAMA_PIN_SHA=""
-if [[ -f "$REPO_ROOT/LLAMA_CPP_SHA" ]]; then
-    LLAMA_PIN_SHA="$(tr -d '[:space:]' < "$REPO_ROOT/LLAMA_CPP_SHA")"
-fi
+    mkdir -p "$target_dir"
+    rm -f "$target_dir/rpc-server" "$target_dir/llama-server"
+    rm -f "$target_dir"/rpc-server-*(N) "$target_dir"/llama-server-*(N)
 
-clone_or_update_llama() {
-    if [[ ! -d "$LLAMA_DIR" ]]; then
-        echo "Cloning Mesh-LLM/llama.cpp ($LLAMA_BRANCH branch)..."
-        git clone -b "$LLAMA_BRANCH" "$LLAMA_REPO" "$LLAMA_DIR"
-    else
-        pushd "$LLAMA_DIR" >/dev/null
-        local current_branch
-        current_branch="$(git branch --show-current 2>/dev/null || true)"
-        if [[ -n "$current_branch" && "$current_branch" != "$LLAMA_BRANCH" ]]; then
-            echo "⚠️  llama.cpp is on branch '$current_branch', switching to $LLAMA_BRANCH..."
-            git checkout "$LLAMA_BRANCH"
+    for name in rpc-server llama-server; do
+        local source="$source_bin_dir/$name"
+        if [[ ! -f "$source" ]]; then
+            echo "Error: expected llama.cpp binary not found: $source" >&2
+            exit 1
         fi
-        echo "Pulling latest $LLAMA_BRANCH from origin..."
-        if ! git pull --ff-only origin "$LLAMA_BRANCH" 2>/dev/null; then
-            echo "⚠️  git pull failed (detached HEAD or offline) — will pin to SHA if available"
-        fi
-        popd >/dev/null
-    fi
+        cp "$source" "$target_dir/$name-$backend"
+    done
 
-    # Pin to exact SHA if LLAMA_CPP_SHA exists
-    if [[ -n "$LLAMA_PIN_SHA" ]]; then
-        pushd "$LLAMA_DIR" >/dev/null
-        local current_sha
-        current_sha="$(git rev-parse HEAD)"
-        if [[ "$current_sha" != "$LLAMA_PIN_SHA" ]]; then
-            echo "Pinning llama.cpp to SHA $LLAMA_PIN_SHA (was ${current_sha:0:12})..."
-            git fetch origin "$LLAMA_PIN_SHA" 2>/dev/null || git fetch origin
-            git checkout "$LLAMA_PIN_SHA" --detach
-        else
-            echo "llama.cpp already at pinned SHA ${LLAMA_PIN_SHA:0:12}"
+    for name in llama-moe-analyze llama-moe-split; do
+        local source="$source_bin_dir/$name"
+        if [[ -f "$source" ]]; then
+            cp "$source" "$target_dir/$name"
         fi
-        popd >/dev/null
-    fi
+    done
+
+    echo "Staged llama.cpp runtime binaries in $target_dir with '$backend' flavor names."
 }
 
-clone_or_update_llama
+LLAMA_WORKDIR="$LLAMA_DIR" "$SCRIPT_DIR/prepare-llama.sh" "${MESH_LLM_LLAMA_PIN_SHA:-pinned}"
 
 configure_compiler_cache
 
@@ -131,5 +115,6 @@ if [[ -d "$MESH_DIR" ]]; then
         )
     fi
 
+    stage_dev_runtime_binaries "metal" "$REPO_ROOT/target/release"
     echo "Mesh binary: target/release/mesh-llm"
 fi

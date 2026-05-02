@@ -26,6 +26,13 @@ async fn make_test_node(role: super::NodeRole) -> Result<Node> {
     let (inflight_change_tx, _) = watch::channel(0u64);
     let (tunnel_tx, _tunnel_rx) = tokio::sync::mpsc::channel(8);
     let (tunnel_http_tx, _tunnel_http_rx) = tokio::sync::mpsc::channel(8);
+    let runtime_data_producer = crate::runtime_data::RuntimeDataCollector::new().producer(
+        crate::runtime_data::RuntimeDataSource {
+            scope: "routing",
+            plugin_data_key: None,
+            plugin_endpoint_key: None,
+        },
+    );
 
     let node = Node {
         endpoint,
@@ -34,7 +41,7 @@ async fn make_test_node(role: super::NodeRole) -> Result<Node> {
             peers: HashMap::new(),
             connections: HashMap::new(),
             remote_tunnel_maps: HashMap::new(),
-            dead_peers: HashSet::new(),
+            dead_peers: HashMap::new(),
             seen_plugin_messages: HashMap::new(),
             seen_plugin_message_order: VecDeque::new(),
             policy_rejected_peers: HashMap::new(),
@@ -49,6 +56,7 @@ async fn make_test_node(role: super::NodeRole) -> Result<Node> {
         llama_ready: Arc::new(Mutex::new(false)),
         available_models: Arc::new(Mutex::new(Vec::new())),
         requested_models: Arc::new(Mutex::new(Vec::new())),
+        explicit_model_interests: Arc::new(Mutex::new(Vec::new())),
         model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_id: Arc::new(Mutex::new(None)),
         first_joined_mesh_ts: Arc::new(Mutex::new(None)),
@@ -62,6 +70,8 @@ async fn make_test_node(role: super::NodeRole) -> Result<Node> {
         inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         inflight_change_tx,
         routing_metrics: crate::network::metrics::RoutingMetrics::default(),
+        local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
+        runtime_data_producer,
         tunnel_tx,
         tunnel_http_tx,
         plugin_manager: Arc::new(Mutex::new(None)),
@@ -94,6 +104,23 @@ async fn make_test_node(role: super::NodeRole) -> Result<Node> {
     });
 
     Ok(node)
+}
+
+#[tokio::test]
+async fn local_request_metrics_snapshot_tracks_accepted_and_completed_requests() {
+    let node = make_test_node(super::NodeRole::Worker)
+        .await
+        .expect("test node should initialize");
+
+    {
+        let _request = node.begin_inflight_request();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let snapshot = node.local_request_metrics_snapshot();
+    assert_eq!(snapshot.accepted_request_counts.len(), 24 * 60 * 60);
+    assert_eq!(snapshot.accepted_request_counts.iter().sum::<u64>(), 1);
+    assert_eq!(snapshot.latency_samples_ms.len(), 1);
 }
 
 #[test]
@@ -533,6 +560,7 @@ fn make_test_peer_info(peer_id: EndpointId) -> PeerInfo {
         hosted_models_known: false,
         available_models: vec![],
         requested_models: vec![],
+        explicit_model_interests: vec![],
         last_seen: std::time::Instant::now(),
         last_mentioned: std::time::Instant::now(),
         moe_recovered_at: None,
@@ -1179,6 +1207,7 @@ fn gossip_frame_roundtrip_preserves_scanned_model_metadata() {
         hosted_models: Some(vec!["Qwen3-8B-Q4_K_M".to_string()]),
         available_models: vec!["Qwen3-8B-Q4_K_M".to_string()],
         requested_models: vec![],
+        explicit_model_interests: vec![],
         version: Some("0.42.0".to_string()),
         model_demand: HashMap::new(),
         mesh_id: Some("deadbeef12345678".to_string()),
@@ -1419,6 +1448,7 @@ fn transitive_peer_update_refreshes_metadata_fields() {
         hosted_models: Some(vec!["NewModel-Q4_K_M".to_string()]),
         available_models: vec!["NewModel-Q4_K_M".to_string()],
         requested_models: vec!["NewModel-Q4_K_M".to_string()],
+        explicit_model_interests: vec!["Org/NewModel-GGUF@main:Q4_K_M".to_string()],
         version: None,
         model_demand: HashMap::new(),
         mesh_id: None,
@@ -1453,6 +1483,11 @@ fn transitive_peer_update_refreshes_metadata_fields() {
         existing.requested_models,
         vec!["NewModel-Q4_K_M".to_string()],
         "requested_models must be refreshed from transitive gossip"
+    );
+    assert_eq!(
+        existing.explicit_model_interests,
+        vec!["Org/NewModel-GGUF@main:Q4_K_M".to_string()],
+        "explicit_model_interests must be refreshed from transitive gossip"
     );
     assert!(existing.available_model_metadata.is_empty());
     assert!(existing.available_model_sizes.is_empty());
@@ -1491,6 +1526,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         hosted_models: None,
         available_models: vec!["SomeModel-Q4_K_M".to_string()],
         requested_models: vec![],
+        explicit_model_interests: vec![],
         version: None,
         model_demand: HashMap::new(),
         mesh_id: None,
@@ -1542,6 +1578,7 @@ fn transitive_peer_merge_preserves_richer_direct_address() {
         hosted_models: None,
         available_models: vec!["SomeModel-Q4_K_M".to_string()],
         requested_models: vec![],
+        explicit_model_interests: vec![],
         version: None,
         model_demand: HashMap::new(),
         mesh_id: None,
@@ -2087,6 +2124,7 @@ fn transitive_peer_update_refreshes_last_mentioned() {
         hosted_models: None,
         available_models: vec![],
         requested_models: vec![],
+        explicit_model_interests: vec![],
         version: None,
         model_demand: HashMap::new(),
         mesh_id: None,
@@ -2509,10 +2547,10 @@ fn worker_only_legacy_models_are_excluded_from_http_routes() {
     assert!(!legacy_worker.routes_http_model("worker-only-model"));
 }
 
-/// Verifies that dead-peer cleanup prevents re-admission: after a peer is cleaned
-/// up and added to dead_peers, the HashSet blocks any further connection attempts,
-/// and a subsequent PeerLeaving from the same peer is rejected as forged (peer_id
-/// no longer in peers set).
+/// Verifies that dead-peer cleanup prevents re-admission within the TTL window:
+/// after a peer is cleaned up and added to dead_peers, the entry blocks connection
+/// attempts until it expires (after [`DEAD_PEER_TTL`]). A subsequent PeerLeaving
+/// from the same peer is rejected as forged (peer_id no longer in peers set).
 #[test]
 fn dead_peer_cleanup_prevents_readmission() {
     use crate::proto::node::PeerLeaving;
@@ -2523,7 +2561,7 @@ fn dead_peer_cleanup_prevents_readmission() {
     // Simulate state: peer is admitted
     let mut peers: HashMap<EndpointId, PeerInfo> = HashMap::new();
     let mut connections: HashSet<EndpointId> = HashSet::new();
-    let mut dead_peers: HashSet<EndpointId> = HashSet::new();
+    let mut dead_peers: HashMap<EndpointId, std::time::Instant> = HashMap::new();
 
     peers.insert(peer_id, make_test_peer_info(peer_id));
     connections.insert(peer_id);
@@ -2548,7 +2586,7 @@ fn dead_peer_cleanup_prevents_readmission() {
     // Clean up — as the handler does
     peers.remove(&accepted_id);
     connections.remove(&accepted_id);
-    dead_peers.insert(accepted_id);
+    dead_peers.insert(accepted_id, std::time::Instant::now());
 
     // Peer is now gone and in dead_peers
     assert!(
@@ -2560,14 +2598,16 @@ fn dead_peer_cleanup_prevents_readmission() {
         "connection must be removed after PeerLeaving"
     );
     assert!(
-        dead_peers.contains(&peer_id),
+        dead_peers.contains_key(&peer_id),
         "peer must be in dead_peers after cleanup"
     );
 
     // Verify dead_peers blocks re-admission (simulates the check in connect_to_peer)
     assert!(
-        dead_peers.contains(&peer_id),
-        "dead_peers.contains check prevents re-connection to cleaned-up peer"
+        dead_peers
+            .get(&peer_id)
+            .is_some_and(|t| t.elapsed() < super::DEAD_PEER_TTL),
+        "dead_peers TTL check prevents re-connection to recently cleaned-up peer"
     );
 
     // A new gossip attempt from the same peer should be blocked by dead_peers
@@ -2598,8 +2638,50 @@ fn dead_peer_cleanup_prevents_readmission() {
         "idempotent remove must not re-insert peer"
     );
     assert!(
-        dead_peers.contains(&peer_id),
+        dead_peers.contains_key(&peer_id),
         "dead_peers must still contain peer after idempotent removal"
+    );
+}
+
+/// Verifies that dead_peers entries expire after DEAD_PEER_TTL and no longer
+/// block transitive re-learning or outbound reconnection.
+#[test]
+fn dead_peer_ttl_expires() {
+    let peer_key = SecretKey::from_bytes(&[0xF0; 32]);
+    let peer_id = EndpointId::from(peer_key.public());
+
+    let mut dead_peers: HashMap<EndpointId, std::time::Instant> = HashMap::new();
+
+    // Insert with a timestamp far enough in the past to be expired.
+    // Use checked_sub to avoid panic on very fresh monotonic clocks.
+    let expired_age = super::DEAD_PEER_TTL + std::time::Duration::from_secs(1);
+    let expired_at = std::time::Instant::now()
+        .checked_sub(expired_age)
+        .expect("monotonic clock too fresh to test TTL expiry");
+    dead_peers.insert(peer_id, expired_at);
+
+    // The TTL check used in connect_to_peer / update_transitive_peer should NOT block
+    assert!(
+        !dead_peers
+            .get(&peer_id)
+            .is_some_and(|t| t.elapsed() < super::DEAD_PEER_TTL),
+        "expired dead_peers entry must not block reconnection"
+    );
+
+    // The GC retain used in the heartbeat loop should remove it
+    dead_peers.retain(|_, ts| ts.elapsed() < super::DEAD_PEER_TTL);
+    assert!(
+        dead_peers.is_empty(),
+        "expired dead_peers entry must be removed by GC"
+    );
+
+    // A fresh entry should still block
+    dead_peers.insert(peer_id, std::time::Instant::now());
+    assert!(
+        dead_peers
+            .get(&peer_id)
+            .is_some_and(|t| t.elapsed() < super::DEAD_PEER_TTL),
+        "fresh dead_peers entry must block reconnection"
     );
 }
 
@@ -2743,6 +2825,7 @@ fn make_test_peer(id: EndpointId, rtt_ms: Option<u32>, vram_gb: u64) -> PeerInfo
         hosted_models_known: false,
         available_models: vec![],
         requested_models: vec![],
+        explicit_model_interests: vec![],
         last_seen: std::time::Instant::now(),
         last_mentioned: std::time::Instant::now(),
         moe_recovered_at: None,
@@ -3187,6 +3270,13 @@ async fn make_test_node_with_owner(
         TrustPolicy::Off,
         current_time_unix_ms(),
     );
+    let runtime_data_producer = crate::runtime_data::RuntimeDataCollector::new().producer(
+        crate::runtime_data::RuntimeDataSource {
+            scope: "routing",
+            plugin_data_key: None,
+            plugin_endpoint_key: None,
+        },
+    );
 
     let node = Node {
         endpoint,
@@ -3195,7 +3285,7 @@ async fn make_test_node_with_owner(
             peers: HashMap::new(),
             connections: HashMap::new(),
             remote_tunnel_maps: HashMap::new(),
-            dead_peers: HashSet::new(),
+            dead_peers: HashMap::new(),
             seen_plugin_messages: HashMap::new(),
             seen_plugin_message_order: VecDeque::new(),
             policy_rejected_peers: HashMap::new(),
@@ -3210,6 +3300,7 @@ async fn make_test_node_with_owner(
         llama_ready: Arc::new(Mutex::new(false)),
         available_models: Arc::new(Mutex::new(Vec::new())),
         requested_models: Arc::new(Mutex::new(Vec::new())),
+        explicit_model_interests: Arc::new(Mutex::new(Vec::new())),
         model_demand: Arc::new(std::sync::Mutex::new(HashMap::new())),
         mesh_id: Arc::new(Mutex::new(None)),
         first_joined_mesh_ts: Arc::new(Mutex::new(None)),
@@ -3223,6 +3314,8 @@ async fn make_test_node_with_owner(
         inflight_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         inflight_change_tx,
         routing_metrics: crate::network::metrics::RoutingMetrics::default(),
+        local_request_metrics: Arc::new(LocalRequestMetricsSampler::default()),
+        runtime_data_producer,
         tunnel_tx,
         tunnel_http_tx,
         plugin_manager: Arc::new(Mutex::new(None)),

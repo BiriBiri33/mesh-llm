@@ -2,6 +2,7 @@ mod chat;
 mod discover;
 mod mesh_hook;
 mod model_interests;
+mod model_targets;
 mod objects;
 mod plugins;
 mod runtime;
@@ -68,6 +69,8 @@ pub(super) const DISPATCH_REQUEST: DispatchRequestFn =
                 ("GET", "/api/status")
                 | ("GET", "/api/models")
                 | ("GET", "/api/runtime")
+                | ("GET", "/api/runtime/llama")
+                | ("GET", "/api/runtime/events")
                 | ("GET", "/api/runtime/endpoints")
                 | ("GET", "/api/runtime/processes")
                 | ("POST", "/api/runtime/models")
@@ -85,6 +88,10 @@ pub(super) const DISPATCH_REQUEST: DispatchRequestFn =
                 }
                 ("GET", "/api/model-interests") | ("POST", "/api/model-interests") => {
                     model_interests::handle(stream, state, method, path_only, body).await?;
+                    Ok(true)
+                }
+                ("GET", "/api/model-targets") => {
+                    model_targets::handle(stream, state).await?;
                     Ok(true)
                 }
                 ("DELETE", p) if p.starts_with("/api/model-interests/") => {

@@ -22,6 +22,7 @@ import type {
 import { type TopSection } from "./features/app-shell/lib/routes";
 import {
   applyThemeMode,
+  displayVramGb,
   formatLiveNodeState,
   localRoutableModels,
   modelDisplayName,
@@ -518,7 +519,7 @@ export function App() {
       )?.started_at_unix;
       nodes.push({
         id: status.node_id,
-        vram: overviewVramGb(status.node_state === "client", status.my_vram_gb),
+        vram: displayVramGb(status.node_state === "client", status.my_vram_gb, status.gpus),
         state: status.node_state,
         self: true,
         host: status.is_host,
@@ -552,7 +553,7 @@ export function App() {
           : peerAssignedModels(p);
       nodes.push({
         id: p.id,
-        vram: overviewVramGb(p.state === "client", p.vram_gb),
+        vram: displayVramGb(p.state === "client", p.vram_gb, p.gpus),
         state: p.state,
         self: false,
         host: /^Host/.test(p.role),

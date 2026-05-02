@@ -6,6 +6,7 @@ use super::{
     proto, PluginMeshEvent, PluginRpcBridge, PluginSummary, ToolCallResult, ToolSummary,
     CONNECT_TIMEOUT_SECS, PROTOCOL_VERSION, REQUEST_TIMEOUT_SECS,
 };
+use crate::runtime_data::RuntimeDataProducer;
 use anyhow::{bail, Context, Result};
 use mesh_llm_plugin::{MeshVisibility, STARTUP_DISABLED_ERROR_CODE};
 use rmcp::model::{InitializeRequestParams, ServerInfo};
@@ -26,6 +27,7 @@ pub(crate) struct ExternalPlugin {
     runtime: Arc<Mutex<Option<PluginRuntime>>>,
     mesh_tx: mpsc::Sender<super::PluginMeshEvent>,
     rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
+    runtime_data_producer: RuntimeDataProducer,
     restart_lock: Arc<Mutex<()>>,
     next_request_id: AtomicU64,
     next_generation: AtomicU64,
@@ -45,6 +47,7 @@ impl ExternalPlugin {
         host_mode: PluginHostMode,
         mesh_tx: mpsc::Sender<PluginMeshEvent>,
         rpc_bridge: Arc<Mutex<Option<Arc<dyn PluginRpcBridge>>>>,
+        runtime_data_producer: RuntimeDataProducer,
     ) -> Result<Self> {
         let plugin = Self {
             spec: spec.clone(),
@@ -55,6 +58,7 @@ impl ExternalPlugin {
                 kind: "external".into(),
                 enabled: true,
                 status: "starting".into(),
+                pid: None,
                 version: None,
                 capabilities: Vec::new(),
                 command: Some(spec.command.clone()),
@@ -68,6 +72,7 @@ impl ExternalPlugin {
             runtime: Arc::new(Mutex::new(None)),
             mesh_tx,
             rpc_bridge,
+            runtime_data_producer,
             restart_lock: Arc::new(Mutex::new(())),
             next_request_id: AtomicU64::new(1),
             next_generation: AtomicU64::new(1),
@@ -96,8 +101,17 @@ impl ExternalPlugin {
         summary
     }
 
+    async fn publish_summary(&self) {
+        let _ = self
+            .runtime_data_producer
+            .publish_plugin_summary(self.summary().await);
+    }
+
     pub(crate) async fn supervise(&self) -> Result<()> {
         if self.is_disabled().await {
+            return Ok(());
+        }
+        if self.is_stopping().await {
             return Ok(());
         }
         self.ensure_running().await?;
@@ -113,6 +127,8 @@ impl ExternalPlugin {
                 let mut summary = self.summary.lock().await;
                 summary.status = "running".into();
                 summary.error = None;
+                drop(summary);
+                self.publish_summary().await;
                 Ok(())
             }
             Some(proto::envelope::Payload::HealthResponse(resp)) => {
@@ -150,8 +166,10 @@ impl ExternalPlugin {
         {
             let mut summary = self.summary.lock().await;
             summary.status = "starting".into();
+            summary.pid = None;
             summary.error = None;
         }
+        self.publish_summary().await;
 
         let listener = bind_local_listener(&self.instance_id, &self.spec.name).await?;
         let endpoint = listener.endpoint();
@@ -168,6 +186,9 @@ impl ExternalPlugin {
         child.env("MESH_LLM_PLUGIN_ENDPOINT", &endpoint);
         child.env("MESH_LLM_PLUGIN_TRANSPORT", transport);
         child.env("MESH_LLM_PLUGIN_NAME", &self.spec.name);
+        if let Some(ref url) = self.spec.url {
+            child.env("MESH_LLM_OPENAI_ENDPOINT_URL", url);
+        }
         child.stdin(std::process::Stdio::null());
         child.stdout(std::process::Stdio::null());
         child.stderr(std::process::Stdio::inherit());
@@ -179,6 +200,8 @@ impl ExternalPlugin {
                 self.spec.name, self.spec.command
             )
         })?;
+        let pid = child.id();
+        self.summary.lock().await.pid = pid;
 
         let stream = tokio::time::timeout(
             std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
@@ -307,6 +330,8 @@ impl ExternalPlugin {
         summary.capabilities = summarize_capabilities(&server_info, &declared_capabilities);
         summary.tools = tools;
         summary.error = None;
+        drop(summary);
+        self.publish_summary().await;
         Ok(())
     }
 
@@ -351,6 +376,33 @@ impl ExternalPlugin {
             .clone()
             .map(|manifest| manifest_tool_summaries(&manifest))
             .unwrap_or_default())
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        {
+            let mut summary = self.summary.lock().await;
+            summary.status = "shutting down".into();
+            summary.error = None;
+        }
+
+        let runtime = self.runtime.lock().await.take();
+        if let Some(runtime) = runtime {
+            let mut pending = runtime.pending.lock().await;
+            for (_, response) in pending.drain() {
+                let _ = response.send(Err(anyhow::anyhow!("plugin shutting down")));
+            }
+        }
+
+        *self.server_info.lock().await = None;
+        *self.manifest.lock().await = None;
+
+        let mut summary = self.summary.lock().await;
+        summary.status = "stopped".into();
+        summary.pid = None;
+        summary.version = None;
+        summary.capabilities.clear();
+        summary.tools.clear();
+        summary.error = None;
     }
 
     pub(crate) async fn call_tool(
@@ -590,7 +642,10 @@ impl ExternalPlugin {
         drop(runtime);
         let mut summary = self.summary.lock().await;
         summary.status = "restarting".into();
+        summary.pid = None;
         summary.error = Some(reason);
+        drop(summary);
+        self.publish_summary().await;
     }
 
     async fn disabled_reason(&self) -> Option<String> {
@@ -611,6 +666,11 @@ impl ExternalPlugin {
         self.disabled_reason().await.is_some()
     }
 
+    async fn is_stopping(&self) -> bool {
+        let summary = self.summary.lock().await;
+        matches!(summary.status.as_str(), "shutting down" | "stopped")
+    }
+
     async fn mark_disabled(&self, generation: u64, reason: String) {
         let mut runtime = self.runtime.lock().await;
         if runtime.as_ref().map(|runtime| runtime.generation) == Some(generation) {
@@ -629,10 +689,13 @@ impl ExternalPlugin {
         let mut summary = self.summary.lock().await;
         summary.enabled = false;
         summary.status = "disabled".into();
+        summary.pid = None;
         summary.version = None;
         summary.capabilities.clear();
         summary.tools.clear();
         summary.error = Some(reason);
+        drop(summary);
+        self.publish_summary().await;
     }
 }
 

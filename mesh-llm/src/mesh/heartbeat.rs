@@ -493,10 +493,10 @@ impl Node {
                             .await
                             {
                                 Ok(Ok(new_conn)) => {
-                                    eprintln!(
+                                    super::emit_mesh_info(format!(
                                         "💚 Heartbeat: reconnected to {}",
                                         peer_id.fmt_short()
-                                    );
+                                    ));
                                     node.state
                                         .lock()
                                         .await
@@ -526,11 +526,11 @@ impl Node {
 
                     if alive {
                         if fail_counts.contains_key(&peer_id) {
-                            eprintln!(
+                            super::emit_mesh_info(format!(
                                 "💚 Heartbeat: {} recovered (was {}/2)",
                                 peer_id.fmt_short(),
                                 fail_counts.get(&peer_id).unwrap_or(&0)
-                            );
+                            ));
                             // Clear dead_peers if peer came back
                             node.state.lock().await.dead_peers.remove(&peer_id);
                         }
@@ -567,7 +567,10 @@ impl Node {
                         if recently_seen && failure_policy.allow_recent_inbound_grace {
                             // Peer is alive via inbound, don't count as failure
                             if fail_counts.contains_key(&peer_id) {
-                                eprintln!("💚 Heartbeat: {} outbound failed but seen recently (inbound alive)", peer_id.fmt_short());
+                                super::emit_mesh_info(format!(
+                                    "💚 Heartbeat: {} outbound failed but seen recently (inbound alive)",
+                                    peer_id.fmt_short()
+                                ));
                                 fail_counts.remove(&peer_id);
                             }
                         } else {
@@ -577,22 +580,26 @@ impl Node {
                                 // Generic peers require 2 misses so a single timeout doesn't
                                 // evict an otherwise-alive inbound-only peer. Shared MoE peers
                                 // are stricter: one missed heartbeat should trigger re-election.
-                                node.state.lock().await.dead_peers.insert(peer_id);
-                                eprintln!(
+                                node.state
+                                    .lock()
+                                    .await
+                                    .dead_peers
+                                    .insert(peer_id, std::time::Instant::now());
+                                super::emit_mesh_warning(format!(
                                     "💔 Heartbeat: {} unreachable ({} failure{}), removing + broadcasting death",
                                     peer_id.fmt_short(),
                                     count,
                                     if *count == 1 { "" } else { "s" }
-                                );
+                                ));
                                 fail_counts.remove(&peer_id);
                                 node.handle_peer_death(peer_id).await;
                             } else {
-                                eprintln!(
+                                super::emit_mesh_warning(format!(
                                     "💛 Heartbeat: {} unreachable ({}/{}), will retry",
                                     peer_id.fmt_short(),
                                     count,
                                     failure_policy.failure_threshold
-                                );
+                                ));
                             }
                         }
                     }
@@ -616,14 +623,23 @@ impl Node {
                         .collect()
                 };
                 for stale_id in stale_peers {
-                    eprintln!(
+                    super::emit_mesh_warning(format!(
                         "🧹 Pruning stale peer {} (no direct or transitive contact in {}s)",
                         stale_id.fmt_short(),
                         PEER_STALE_SECS * 2
-                    );
+                    ));
                     node.remove_peer(stale_id).await;
                     // Also close any lingering connection
                     node.state.lock().await.connections.remove(&stale_id);
+                }
+
+                // GC expired dead_peers entries so recovered peers can be
+                // re-learned transitively through gossip.
+                {
+                    let mut state = node.state.lock().await;
+                    state
+                        .dead_peers
+                        .retain(|_, ts| ts.elapsed() < DEAD_PEER_TTL);
                 }
 
                 // GC expired demand entries to prevent unbounded map growth
@@ -634,17 +650,17 @@ impl Node {
 
     /// Handle a peer death: remove from state, broadcast to all other peers.
     pub async fn handle_peer_death(&self, dead_id: EndpointId) {
-        eprintln!(
+        super::emit_mesh_warning(format!(
             "⚠️  Peer {} died — removing and broadcasting",
             dead_id.fmt_short()
-        );
+        ));
         {
             let mut state = self.state.lock().await;
             // Keep the connection alive — if the peer recovers, their inbound
             // gossip will arrive on the existing connection and trigger recovery
             // via handle_gossip_stream → add_peer → clear dead_peers.
             // Don't remove: state.connections.remove(&dead_id);
-            state.dead_peers.insert(dead_id);
+            state.dead_peers.insert(dead_id, std::time::Instant::now());
         }
         self.remove_peer(dead_id).await;
         self.broadcast_peer_down(dead_id).await;
@@ -745,11 +761,11 @@ impl Node {
         };
 
         let existing_id = existing_conn.stable_id();
-        eprintln!(
+        super::emit_mesh_info(format!(
             "🔄 Relay health: refreshing {} ({})",
             peer_id.fmt_short(),
             reason.label()
-        );
+        ));
         tracing::info!(
             "Relay health: refreshing {} ({})",
             peer_id.fmt_short(),

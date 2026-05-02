@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -181,16 +182,9 @@ jobs:
         run: cargo clippy -- -D warnings || true
 
       # ── llama.cpp (CPU-only for CI) ──
-      - name: Clone llama.cpp fork
+      - name: Prepare patched llama.cpp
         run: |
-          git clone -b master --depth 1 https://github.com/Mesh-LLM/llama.cpp.git llama.cpp
-          if [[ -f LLAMA_CPP_SHA ]]; then
-            SHA=$(tr -d '[:space:]' < LLAMA_CPP_SHA)
-            cd llama.cpp
-            git fetch --depth 1 origin "$SHA"
-            git checkout "$SHA"
-            cd ..
-          fi
+          scripts/prepare-llama.sh pinned
 
       - name: Build llama.cpp (CPU + RPC)
         run: |
@@ -367,15 +361,9 @@ jobs:
       - name: Build mesh-llm binary (debug)
         run: cargo build -p mesh-llm --bin mesh-llm
 
-      - name: Clone llama.cpp fork
+      - name: Prepare patched llama.cpp
         run: |
-          git clone -b master --depth 1 https://github.com/Mesh-LLM/llama.cpp.git llama.cpp
-          if [[ -f LLAMA_CPP_SHA ]]; then
-            SHA=$(tr -d '[:space:]' < LLAMA_CPP_SHA)
-            cd llama.cpp
-            git fetch --depth 1 origin "$SHA"
-            git checkout "$SHA"
-          fi
+          scripts/prepare-llama.sh pinned
 
       - name: Build llama.cpp (CPU + RPC)
         run: |
@@ -484,17 +472,10 @@ jobs:
         run: cargo test -p mesh-llm --lib --tests
 
       # ── llama.cpp (Metal + RPC) ──
-      - name: Clone llama.cpp fork
+      - name: Prepare patched llama.cpp
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
         run: |
-          git clone -b master --depth 1 https://github.com/Mesh-LLM/llama.cpp.git llama.cpp
-          if [[ -f LLAMA_CPP_SHA ]]; then
-            SHA=$(tr -d '[:space:]' < LLAMA_CPP_SHA)
-            cd llama.cpp
-            git fetch --depth 1 origin "$SHA"
-            git checkout "$SHA"
-            cd ..
-          fi
+          scripts/prepare-llama.sh pinned
 
       - name: Build llama.cpp (CPU + RPC)
         if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.ui == 'true' }}
@@ -1026,6 +1007,7 @@ jobs:
             libdbus-1-dev \
             libvulkan-dev \
             glslc \
+            spirv-headers \
             python3
           sudo rm -rf /var/lib/apt/lists/*
 

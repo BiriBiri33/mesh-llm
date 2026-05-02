@@ -23,7 +23,7 @@ This file covers local build and development workflows for this repository.
 
 ## Build from source
 
-Build everything (llama.cpp fork, mesh binary, and UI production build):
+Build everything (patched llama.cpp, mesh binary, and UI production build):
 
 ```bash
 just build
