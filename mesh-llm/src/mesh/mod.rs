@@ -1463,6 +1463,9 @@ impl Node {
         } else if cfg!(target_os = "windows") {
             builder = builder.bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?;
         }
+        } else if cfg!(target_os = "windows") {
+            builder = builder.bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?;
+        }
         let endpoint = builder.bind().await?;
         // Wait briefly for relay connection so the invite token includes the relay URL.
         // On sinkholed networks this times out and we proceed without relay (direct UDP only).
@@ -4483,3 +4486,4 @@ mod tests;
 
 #[cfg(test)]
 mod public_identity_tests;
+
